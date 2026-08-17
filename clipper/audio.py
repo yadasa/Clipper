@@ -63,7 +63,10 @@ def _duck_expression(
     normal = max(0.0, min(1.0, float(normal_gain)))
     duck = max(0.0, min(normal, float(duck_gain)))
     if not intervals:
-        return f"{duck:.4f}"
+        # Missing word timestamps should not permanently force the music into its
+        # ducked state. Keep the normal bed level and let the final loudness pass
+        # handle overall delivery level.
+        return f"{normal:.4f}"
     condition = "+".join(f"between(t,{start:.4f},{end:.4f})" for start, end in intervals)
     return f"if({condition},{duck:.4f},{normal:.4f})"
 
