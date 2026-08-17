@@ -40,6 +40,28 @@ def _project_id() -> str:
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
 
 
+def _is_disposable_staged_input(value: str, settings: Settings) -> bool:
+    """Identify API/Firebase inbox files that can be hard-linked into a project.
+
+    These inputs are deleted after the job, so retaining their inode through a
+    project hard link avoids a second multi-gigabyte copy without weakening the
+    normal copy-on-ingest semantics for arbitrary creator files.
+    """
+    if value.startswith("http://") or value.startswith("https://"):
+        return False
+    try:
+        path = Path(value).expanduser().resolve()
+    except OSError:
+        return False
+    for staging_root in (settings.workdir / "incoming", settings.workdir / "firebase_inbox"):
+        try:
+            path.relative_to(staging_root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _cached_transcribe(path: str | Path, settings: Settings, cache: StageCache) -> Transcript:
     options = {
         "model": settings.whisper_model,
@@ -420,12 +442,15 @@ def process_video(
     manifest_path = root / "manifest.json"
     _dump_json(manifest_path, manifest.to_dict())
 
+    def hardlink_ok(value: str) -> bool:
+        return bool(prefer_hardlink_ingest or _is_disposable_staged_input(value, settings))
+
     try:
         primary = ingest(
             source,
             source_dir,
             own_content_ack=own_content_ack,
-            prefer_hardlink=prefer_hardlink_ingest,
+            prefer_hardlink=hardlink_ok(source),
         )
         manifest.source_path = str(primary)
         manifest.source_name = primary.name
@@ -443,7 +468,7 @@ def process_video(
                 external_audio,
                 root / "external_audio",
                 own_content_ack=own_content_ack,
-                prefer_hardlink=prefer_hardlink_ingest,
+                prefer_hardlink=hardlink_ok(external_audio),
             )
             audio_transcript = _cached_transcribe(audio_path, settings, cache)
             sync = estimate_sync(primary, audio_path, primary_transcript, audio_transcript)
@@ -460,7 +485,7 @@ def process_video(
                 secondary,
                 root / "cameras" / f"camera_{index + 2}",
                 own_content_ack=own_content_ack,
-                prefer_hardlink=prefer_hardlink_ingest,
+                prefer_hardlink=hardlink_ok(secondary),
             )
             sec_transcript = _cached_transcribe(sec_path, settings, cache)
             sync = estimate_sync(primary, sec_path, primary_transcript, sec_transcript)
