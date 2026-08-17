@@ -2,7 +2,7 @@
 
 Local-first automated video clipping for recordings you make, with an optional Firebase handoff when you are away from your desktop.
 
-Clipper takes a local recording or an authorized social-media source, transcribes it with word timestamps, selects strong standalone moments, cleans dead air, reframes the speaker, adds active-word captions, hook cards, punch-ins, transcript-matched visuals, branding and optional music, then returns ready-to-review clips in each selected aspect ratio. Separate microphone tracks and extra cameras can be aligned automatically. A Firebase-hosted uploader can queue work for a home desktop and show the finished versions after the desktop uploads them back.
+Clipper takes a local recording or an authorized social-media source, transcribes it with word timestamps, selects strong standalone moments, cleans dead air, reframes the speaker, adds active-word captions, hook cards, punch-ins, context-aware B-roll, branding, and optional music, then returns ready-to-review clips in each selected aspect ratio. Separate microphone tracks and extra cameras can be aligned automatically. A Firebase-hosted uploader can queue work for a home desktop and show the finished versions after the desktop uploads them back.
 
 ## What is implemented
 
@@ -18,14 +18,16 @@ Clipper takes a local recording or an authorized social-media source, transcribe
 - Karaoke active-word captions plus clean and minimal caption presets with portrait safe zones.
 - Truthful opening hook/title cards, generated locally or optionally refined with Gemini.
 - Reusable brand kits for font, caption colors, accent color, logo, logo position, and hook treatment.
-- Optional background music with sidechain speech ducking and final loudness normalization.
-- Transcript-aware visual planning with Wikimedia Commons retrieval by default and optional local Diffusers image generation.
-- Automatic visual composition plus optional alternate split-screen, picture-in-picture, and full-screen/interruption edits.
+- Optional background music with transcript-aware speech ducking and final loudness normalization.
+- Context-aware B-roll planning tied to spoken phrases and corrected against word timestamps before render.
+- Ordered B-roll resolver with a personal local library, optional Pexels stock video, optional Pixabay stock video, Wikimedia Commons imagery, and optional local Diffusers generation.
+- Video and still-image B-roll composition as split-screen, picture-in-picture, or full-screen/interruption edits.
+- B-roll search/download caching, bounded atomic downloads, project-local materialization, provenance metadata, and manual-asset preservation.
 - Separate-microphone and multicamera synchronization using transcript n-gram anchors, robust clock-drift fitting, and waveform cross-correlation fallback.
 - Automatic speech-boundary multicam cuts.
 - H.264/AAC MP4 output, `yuv420p`, loudness normalization, metadata scrubbing, and `+faststart` for web/social delivery.
 - CPU x264 or NVIDIA NVENC output with automatic fallback.
-- Non-destructive `edit_plan.json` files: change trims, enabled clips, ratios, layouts, captions, hooks, brand and music, then rerender without retranscribing.
+- Non-destructive `edit_plan.json` files: change trims, enabled clips, ratios, layouts, captions, hooks, brand, and music, then rerender without retranscribing.
 - Stage and render caching with artifact validation and interruption-safe manifest writes.
 - Per-clip social metadata and thumbnails for the library/publishing layer.
 - Local FastAPI processing API and rerender endpoint.
@@ -34,7 +36,7 @@ Clipper takes a local recording or an authorized social-media source, transcribe
 - Beige/brown responsive interface with muted accents.
 - GitHub Actions quality, dependency, FFmpeg feature, and optional self-hosted A4000 CUDA/NVENC tests on every push.
 
-The ten creator-workflow additions from the V2 pass are documented in `FEATURES_V2.md`.
+The creator-workflow additions from the V2 pass are documented in `FEATURES_V2.md`. The current implementation backlog is `NEXT_IMPLEMENTATION_CHECKLIST.md`, B-roll internals are documented in `BROLL_ARCHITECTURE.md`, and repository engineering expectations are in `QUALITY_STANDARDS.md`.
 
 ## Why this is not a byte-for-byte OpenShorts mirror
 
@@ -80,7 +82,7 @@ Parallel output renders: 2
 
 Explicit non-empty environment values override the automatic profile. Empty tuning values in `.env` intentionally count as “auto.”
 
-You can inspect what the workstation sees with:
+Inspect the workstation profile with:
 
 ```bash
 python -m clipper.cli profile
@@ -117,7 +119,7 @@ Useful creator controls:
 
 ### Non-destructive rerender
 
-Every project contains `edit_plan.json`. Modify that plan to change clip trims, disable a clip, change aspect ratios/layout modes, caption preset, hook text or other edit options, then rerender without rerunning transcription:
+Every project contains `edit_plan.json`. Modify that plan to change clip trims, disable a clip, change aspect ratios/layout modes, caption preset, hook text, or other edit options, then rerender without rerunning transcription:
 
 ```bash
 python -m clipper.cli rerender data/projects/<project-id>
@@ -135,31 +137,55 @@ Social-link import requires the ownership/permission acknowledgement. Clipper as
 
 Clipper does not erase a baked-in watermark from another creator's media. The intended flow is to recover the clean source of media you own.
 
-## Visual/B-roll behavior
+## Context-aware B-roll
 
-Default:
-
-```env
-VISUAL_PROVIDER=commons
-```
-
-This searches Wikimedia Commons using phrases derived from the transcript and stores attribution metadata beside each retrieved image.
-
-For fully local generated imagery:
+The default resolver is a provider waterfall:
 
 ```env
-VISUAL_PROVIDER=diffusers
-DIFFUSION_MODEL=<a compatible Diffusers model id or local path>
-```
-
-For Commons first with local generation as fallback:
-
-```env
+BROLL_AUTO_INSERT=1
+BROLL_PROVIDERS=local,pexels,pixabay,commons,diffusers
+BROLL_LIBRARY=
+PEXELS_API_KEY=
+PIXABAY_API_KEY=
+DIFFUSION_MODEL=
 VISUAL_PROVIDER=auto
-DIFFUSION_MODEL=<model>
 ```
 
-Gemini is optional. Without it, local heuristics select clips, generate hooks/metadata and create visual queries. With `GEMINI_API_KEY`, Gemini can rerank candidates and improve hook, metadata, and visual planning.
+Unavailable providers are skipped, so the default configuration works without every optional API key. `VISUAL_PROVIDER=none` disables automatic B-roll. The legacy `commons`, `diffusers`, and `auto` values remain supported.
+
+The pipeline works in two stages:
+
+1. visual planning identifies concrete spoken ideas and assigns cue windows;
+2. immediately before FFmpeg composition, Clipper matches the cue transcript back to word timestamps and snaps the insert to the phrase it actually illustrates.
+
+This prevents relevant B-roll from appearing several seconds early or late.
+
+### Personal B-roll library
+
+Point `BROLL_LIBRARY` to reusable media you own. Clipper searches filename/folder context and optional JSON metadata. A sidecar can be named either `asset.mp4.json` or `asset.json`:
+
+```json
+{
+  "title": "Coffee beans roasting in drum",
+  "description": "Close-up of a small-batch coffee roaster",
+  "tags": ["coffee", "beans", "roasting"],
+  "creator": "TJ",
+  "license": "owned"
+}
+```
+
+### Stock and generated sources
+
+- **Pexels:** optional stock-video search when `PEXELS_API_KEY` is configured.
+- **Pixabay:** optional stock-video search when `PIXABAY_API_KEY` is configured.
+- **Wikimedia Commons:** no-key still-image fallback with attribution metadata.
+- **Diffusers:** optional local generated-image fallback when `DIFFUSION_MODEL` is configured.
+
+Remote search payloads and downloaded stock assets are cached. Selected assets are hard-linked or copied into the project for reproducibility. Downloads are size-bounded and atomically finalized. Short video B-roll is stream-looped only for the cue window, and B-roll audio is never mapped into the final creator audio.
+
+See `BROLL_ARCHITECTURE.md` for provider contracts, caching, provenance, and extension rules.
+
+Gemini remains optional. Without it, deterministic local heuristics select clips, hooks/metadata, and spoken-phrase B-roll cues. With `GEMINI_API_KEY`, Gemini can rerank candidates and refine hook, metadata, and B-roll planning.
 
 ## Encoder/performance controls
 
@@ -173,7 +199,7 @@ FFMPEG_ENCODER=
 RENDER_WORKERS=
 ```
 
-Set them only when you want to override auto-tuning. Subject tracking, transcription, prepared edit stages, local image models, and final render signatures all use caching to avoid repeating work unnecessarily.
+Set them only when overriding auto-tuning. Subject tracking, transcription, prepared edit stages, B-roll searches/assets, local image models, and final render signatures use caching to avoid repeating unchanged work.
 
 ## Local API
 
@@ -186,8 +212,10 @@ Endpoints:
 - `GET /api/health` — includes the detected hardware profile.
 - `GET /api/projects`
 - `GET /api/jobs/{job_id}`
-- `POST /api/process` — accepts primary media, extra cameras, separate mic, music, logo, brand fields and edit-intelligence controls.
+- `POST /api/process` — accepts primary media, extra cameras, separate mic, music, logo, brand fields, and edit-intelligence controls.
 - `POST /api/projects/{project_id}/rerender` — rerenders the existing editable plan without retranscription.
+
+Do not expose the development API directly to an untrusted network; LAN/API authentication hardening is tracked in the implementation checklist.
 
 ## Firebase mobile -> home desktop flow
 
@@ -228,7 +256,7 @@ UPLOAD_POST_API_KEY=
 UPLOAD_POST_USER=
 ```
 
-Then select platforms in the web uploader. If you leave the post description blank, Clipper uses the generated social metadata. Publishing remains opt-in. Clipper chooses the closest rendered aspect ratio per platform and uses an idempotency key to reduce accidental duplicate submissions. The original finished files are preserved even if a publishing request fails.
+Then select platforms in the web uploader. If the post description is blank, Clipper uses generated social metadata. Publishing remains opt-in. Clipper chooses the closest rendered aspect ratio per platform and uses an idempotency key to reduce accidental duplicate submissions. Finished files remain preserved if publishing fails.
 
 CLI publishing is also available:
 
@@ -241,38 +269,49 @@ python -m clipper.cli publish data/projects/<project>/manifest.json --platform t
 Each local source creates approximately:
 
 ```text
-data/projects/<project-id>/
-  manifest.json
-  transcript.json
-  clip_candidates.json
-  edit_plan.json
-  source/
-  sync/
-  prepared/<clip-id>/
-  visuals/<clip-id>/timeline.json
-  clips/<clip-id>/render-cache.json
-  clips/<clip-id>/<ratio>/...mp4
-  clips/<clip-id>/<ratio>/...jpg
+data/
+  cache/
+    broll/
+      search/
+      assets/
+  projects/<project-id>/
+    manifest.json
+    transcript.json
+    clip_candidates.json
+    edit_plan.json
+    source/
+    sync/
+    prepared/<clip-id>/
+    visuals/<clip-id>/
+      timeline.json
+      cue_00/...
+    clips/<clip-id>/
+      render-cache.json
+      <ratio>/...mp4
+      <ratio>/...jpg
 ```
 
 The Firebase library mirrors the same concept: one project per starting source, with every finished clip and selected aspect-ratio/composition version grouped beneath it.
 
 ## GitHub Actions validation
 
-`.github/workflows/ci.yml` runs on **every push**, every pull request, and manual dispatch. It has three layers:
+`.github/workflows/ci.yml` runs on every push, every pull request, and manual dispatch. It has three layers:
 
 1. **Fast quality gate** — Python compilation, fatal Ruff scan, unit/regression tests, browser JavaScript parse, and Firebase JSON validation.
-2. **Runtime + FFmpeg feature smoke** — installs the real runtime dependency set and FFmpeg, imports the full application/API, verifies required FFmpeg filters, then executes synthetic smart-cut, silent-video, punch-in, karaoke caption, hook, brand/logo, music-ducking, and 9:16 render paths.
-3. **Optional A4000 GPU smoke** — verifies CUDA, the A4000 identity, `h264_nvenc`, a real NVENC encode and ffprobe result on your own desktop runner.
+2. **Runtime + FFmpeg feature smoke** — installs the real runtime dependency set and FFmpeg, imports the full application/API, verifies required FFmpeg filters, then executes synthetic smart-cut, silent-video, punch-in, video-B-roll, karaoke-caption, hook, brand/logo, music-ducking, and 9:16 render paths.
+3. **Optional A4000 GPU smoke** — verifies CUDA, the A4000 identity, `h264_nvenc`, a real NVENC encode, and ffprobe result on your own desktop runner.
 
-The A4000 job is intentionally opt-in so GitHub-hosted jobs do not wait forever for a machine that is offline. To activate it, register your desktop as a self-hosted Windows x64 runner with the `a4000` label and set the repository Actions variable `A4000_RUNNER_ENABLED` to `true`. When the desktop runner is online, pushes exercise your real CUDA/NVENC path as well as the hosted CPU tests.
+The A4000 job is intentionally opt-in so GitHub-hosted jobs do not wait for a machine that is offline. To activate it, register the desktop as a self-hosted Windows x64 runner with the `a4000` label and set repository Actions variable `A4000_RUNNER_ENABLED=true`.
 
-## Reports
+## Reports and engineering docs
 
-- `FEATURES_V2.md` — the ten must-have creator features added in the V2 pass.
-- `ARCHITECTURE_REPORT.md` — how OpenShorts works, capabilities, speed, gaps, and the Clipper redesign.
-- `UPSTREAM_IMPORT.md` — what was imported, what was intentionally excluded, and why.
-- `IMPLEMENTATION_REPORT.md` — ordered implementation status, bug/optimization passes, and environment-dependent validation items.
+- `NEXT_IMPLEMENTATION_CHECKLIST.md` — canonical remaining-work and acceptance checklist.
+- `BROLL_ARCHITECTURE.md` — context-aware B-roll provider/timing/cache architecture.
+- `QUALITY_STANDARDS.md` — architecture, failure-mode, media-quality, and testing expectations.
+- `FEATURES_V2.md` — creator features from the V2 pass.
+- `ARCHITECTURE_REPORT.md` — OpenShorts architecture/capability audit and Clipper redesign.
+- `UPSTREAM_IMPORT.md` — imported vs intentionally excluded upstream material.
+- `IMPLEMENTATION_REPORT.md` — implementation status, bug/optimization passes, environment-dependent validation.
 
 ## License
 
