@@ -63,10 +63,9 @@ def _duck_expression(
     normal = max(0.0, min(1.0, float(normal_gain)))
     duck = max(0.0, min(normal, float(duck_gain)))
     if not intervals:
-        # Missing word timestamps should not permanently force the music into its
-        # ducked state. Keep the normal bed level and let the final loudness pass
-        # handle overall delivery level.
-        return f"{normal:.4f}"
+        # With source speech but no trustworthy word timings, the safe fallback
+        # is to keep the bed conservatively low rather than risk masking dialogue.
+        return f"{duck:.4f}"
     condition = "+".join(f"between(t,{start:.4f},{end:.4f})" for start, end in intervals)
     return f"if({condition},{duck:.4f},{normal:.4f})"
 
@@ -85,9 +84,9 @@ def music_mix_filters(
     """Mix a transcript-aware music bed beneath speech.
 
     Music sits around ``music_gain`` between spoken phrases and drops to
-    ``duck_gain`` during merged word-timestamp windows. The resulting mix is then
-    loudness-normalized for social delivery. This works on stock FFmpeg builds
-    that do not include sidechain compression.
+    ``duck_gain`` during merged word-timestamp windows. If timings are unavailable,
+    it stays at the conservative duck level. The resulting mix is then loudness-
+    normalized for social delivery and does not require sidechain compression.
     """
     intervals = speech_intervals(
         list(speech_words or []),
