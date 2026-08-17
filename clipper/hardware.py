@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,20 +46,17 @@ def _nvidia_info() -> tuple[str | None, float | None]:
 
 
 def _cuda_available() -> bool:
-    """Check the CUDA runtime used by faster-whisper first, then optional PyTorch.
-
-    CTranslate2 ships with faster-whisper and is the relevant inference backend for
-    Clipper's transcription path. This avoids making the large PyTorch package a
-    mandatory base dependency just to detect the GPU.
-    """
+    """Check the CUDA runtime used by faster-whisper first, then optional PyTorch."""
     try:
         import ctranslate2
+
         if int(ctranslate2.get_cuda_device_count()) > 0:
             return True
     except Exception:
         pass
     try:
         import torch
+
         return bool(torch.cuda.is_available())
     except Exception:
         return False
@@ -67,13 +65,20 @@ def _cuda_available() -> bool:
 def _nvenc_available() -> bool:
     try:
         from ffmpeg_utils import nvenc_available
+
         return bool(nvenc_available())
     except Exception:
         return False
 
 
+@lru_cache(maxsize=1)
 def detect_hardware_profile() -> HardwareProfile:
-    """Return conservative automatic defaults for the current workstation."""
+    """Return conservative automatic defaults for the current worker process.
+
+    Driver/GPU capability probes are stable for the lifetime of the desktop worker,
+    so cache them rather than spawning `nvidia-smi` and encoder probes for every
+    queued project and every health check.
+    """
     gpu_name, vram = _nvidia_info()
     cuda = _cuda_available()
     nvenc = _nvenc_available() if gpu_name else False
