@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import threading
 import time
@@ -10,12 +11,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Settings
+from .media import is_social_url
 from .pipeline import process_video
 from .publish import PREFERRED_RATIO, UploadPostPublisher
 
 
 class FirebaseBridge:
     """Firebase-backed handoff between the mobile/web uploader and a trusted desktop worker."""
+
+    ACTIVE_STATES = {"claimed", "processing", "uploading", "publishing"}
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
@@ -66,6 +70,7 @@ class FirebaseBridge:
                 "claimedAt": firestore.SERVER_TIMESTAMP,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
                 "leaseExpiresAt": now + timedelta(minutes=3),
+                "lastError": None,
             })
             value = snapshot.to_dict()
             value["id"] = snapshot.id
@@ -75,7 +80,7 @@ class FirebaseBridge:
 
     def claim_next(self) -> dict | None:
         docs = list(self.db.collection("clipperJobs").where("status", "==", "queued").limit(20).stream())
-        docs.sort(key=lambda s: str((s.to_dict() or {}).get("createdAt") or ""))
+        docs.sort(key=lambda snapshot: str((snapshot.to_dict() or {}).get("createdAt") or ""))
         for snapshot in docs:
             job = self._claim(snapshot.reference)
             if job:
@@ -84,11 +89,10 @@ class FirebaseBridge:
 
     def _heartbeat(self, job_id: str, stop: threading.Event) -> None:
         ref = self.db.collection("clipperJobs").document(job_id)
-        active_states = {"claimed", "processing", "uploading", "publishing"}
         while not stop.wait(45):
             snapshot = ref.get()
             data = snapshot.to_dict() or {}
-            if data.get("workerId") != self.worker_id or data.get("status") not in active_states:
+            if data.get("workerId") != self.worker_id or data.get("status") not in self.ACTIVE_STATES:
                 return
             ref.update({
                 "leaseExpiresAt": datetime.now(timezone.utc) + timedelta(minutes=3),
@@ -96,20 +100,45 @@ class FirebaseBridge:
             })
             self._worker_state(data.get("status", "processing"), job_id)
 
+    def _requeue_if_expired(self, reference, now: datetime) -> bool:
+        """Transactionally re-check a stale lease before returning a job to queue.
+
+        The query that found the document can race a heartbeat. Reading it again
+        inside a Firestore transaction prevents an active worker from being
+        requeued after it has already renewed its lease.
+        """
+        transaction = self.db.transaction()
+        firestore = self.firestore
+
+        @firestore.transactional
+        def requeue(transaction, reference):
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            lease = data.get("leaseExpiresAt")
+            if data.get("status") not in self.ACTIVE_STATES or not lease or lease >= now:
+                return False
+            transaction.update(reference, {
+                "status": "queued",
+                "workerId": None,
+                "leaseExpiresAt": None,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "lastError": "Worker lease expired; job returned to queue",
+            })
+            return True
+
+        return bool(requeue(transaction, reference))
+
     def requeue_expired(self) -> int:
         now = datetime.now(timezone.utc)
         count = 0
-        for status in ("claimed", "processing", "uploading", "publishing"):
-            for snapshot in self.db.collection("clipperJobs").where("status", "==", status).limit(50).stream():
+        for status in sorted(self.ACTIVE_STATES):
+            snapshots = self.db.collection("clipperJobs").where("status", "==", status).limit(50).stream()
+            for snapshot in snapshots:
                 data = snapshot.to_dict() or {}
                 lease = data.get("leaseExpiresAt")
-                if lease and lease < now:
-                    snapshot.reference.update({
-                        "status": "queued",
-                        "workerId": None,
-                        "updatedAt": self.firestore.SERVER_TIMESTAMP,
-                        "lastError": "Worker lease expired; job returned to queue",
-                    })
+                if lease and lease < now and self._requeue_if_expired(snapshot.reference, now):
                     count += 1
         return count
 
@@ -134,7 +163,16 @@ class FirebaseBridge:
         suffix = Path(safe_path).suffix or ".bin"
         local = self.settings.workdir / "firebase_inbox" / job["id"] / local_group / f"input_{index}{suffix}"
         local.parent.mkdir(parents=True, exist_ok=True)
-        self.bucket.blob(safe_path).download_to_filename(str(local))
+        temp = local.with_name(local.name + ".part")
+        temp.unlink(missing_ok=True)
+        try:
+            self.bucket.blob(safe_path).download_to_filename(str(temp), timeout=600)
+            if not temp.is_file() or temp.stat().st_size <= 0:
+                raise RuntimeError(f"Firebase Storage returned an empty file for {safe_path}")
+            os.replace(temp, local)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
         return local
 
     def _source_value(self, job: dict) -> str:
@@ -145,6 +183,8 @@ class FirebaseBridge:
         if source_url:
             if not bool(job.get("ownContentAck", False)):
                 raise RuntimeError("Social URL job is missing content ownership/permission acknowledgement")
+            if not is_social_url(source_url):
+                raise RuntimeError("Firebase remote source is not a supported social URL")
             return source_url
         raise RuntimeError("Firebase job has neither sourceStoragePath nor sourceUrl")
 
@@ -184,7 +224,9 @@ class FirebaseBridge:
         if brand_data:
             brand_path = self.settings.workdir / "firebase_inbox" / job["id"] / "brand" / "brand.json"
             brand_path.parent.mkdir(parents=True, exist_ok=True)
-            brand_path.write_text(json.dumps(brand_data, indent=2), encoding="utf-8")
+            temp = brand_path.with_suffix(".json.part")
+            temp.write_text(json.dumps(brand_data, indent=2), encoding="utf-8")
+            os.replace(temp, brand_path)
             settings.brand_kit_path = str(brand_path)
         return settings
 
@@ -262,8 +304,12 @@ class FirebaseBridge:
                 ratio = PREFERRED_RATIO.get(platform, "9:16")
                 by_ratio.setdefault(ratio, []).append(platform)
             for ratio, group in by_ratio.items():
-                matches = [v for v in variants if v.get("aspect_ratio") == ratio and Path(v.get("path", "")).is_file()]
-                fallback = [v for v in variants if Path(v.get("path", "")).is_file()]
+                matches = [
+                    variant
+                    for variant in variants
+                    if variant.get("aspect_ratio") == ratio and Path(variant.get("path", "")).is_file()
+                ]
+                fallback = [variant for variant in variants if Path(variant.get("path", "")).is_file()]
                 variant = (matches or fallback or [None])[0]
                 if not variant:
                     errors.append(f"{candidate.get('id', 'clip')}: no rendered file available for {', '.join(group)}")
@@ -273,7 +319,12 @@ class FirebaseBridge:
                     description = manual_description or metadata.get("caption", "")
                     if len(group) == 1:
                         per_platform = platform_meta.get(group[0]) or {}
-                        description = manual_description or per_platform.get("caption") or per_platform.get("description") or description
+                        description = (
+                            manual_description
+                            or per_platform.get("caption")
+                            or per_platform.get("description")
+                            or description
+                        )
                     response = publisher.upload_video(
                         variant["path"],
                         group,
@@ -331,6 +382,7 @@ class FirebaseBridge:
                     "socialMetadata": clip.get("social_metadata"),
                     "smartCutIntervals": clip.get("smart_cut_intervals"),
                     "punchIns": clip.get("punch_ins"),
+                    "visualCues": clip.get("visual_cues") or [],
                 }
                 for index, clip in enumerate(manifest.clips)
             }
@@ -373,6 +425,7 @@ class FirebaseBridge:
         finally:
             stop.set()
             heartbeat.join(timeout=2)
+            shutil.rmtree(self.settings.workdir / "firebase_inbox" / job_id, ignore_errors=True)
             self._worker_state("idle")
 
     def run_forever(self) -> None:
