@@ -8,55 +8,13 @@ from pathlib import Path
 
 from ffmpeg_utils import DELIVERY, METADATA_SCRUB, audio_encode_args, video_encode_args
 
+from .audio import has_audio, music_input_args, music_mix_filters
+from .brand import BrandKit
+from .captions import write_captions
 from .config import ASPECT_PRESETS
 from .focus import crop_geometry, track_face_centers, write_sendcmd
 from .media import probe
 from .models import ClipCandidate, RenderedVariant, VisualCue, Word
-
-
-def _ass_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h}:{m:02d}:{s:05.2f}"
-
-
-def _ass_escape(text: str) -> str:
-    return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
-
-
-def write_ass(words: list[Word], candidate: ClipCandidate, path: str | Path, width: int, height: int) -> Path:
-    local = [w for w in words if w.end >= candidate.start and w.start <= candidate.end]
-    font_size = max(42, int(height * 0.042))
-    margin_v = int(height * (0.17 if height > width else 0.09))
-    header = f"""[Script Info]
-ScriptType: v4.00+
-PlayResX: {width}
-PlayResY: {height}
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H001F1A16,&H66000000,-1,0,0,0,100,100,0,0,1,4,1,2,70,70,{margin_v},1
-
-[Events]
-Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-"""
-    lines = [header]
-    for i in range(0, len(local), 4):
-        chunk = local[i : i + 4]
-        if not chunk:
-            continue
-        start = max(0.0, chunk[0].start - candidate.start)
-        end = min(candidate.duration, chunk[-1].end - candidate.start + 0.08)
-        text = _ass_escape(" ".join(w.text for w in chunk).upper())
-        lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}\n")
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(lines), encoding="utf-8")
-    return out
 
 
 def _escape_filter_path(path: str | Path) -> str:
@@ -87,22 +45,12 @@ def _base_filter(
     height: int,
     work_path: Path,
 ) -> str:
-    """Build a subject-aware crop when possible, center-cropping as a safe fallback.
-
-    Face analysis is low-resolution and cached per source clip, so rendering four
-    aspect/layout variants does not repeat detector work. FFmpeg performs the
-    actual full-resolution crop and scale natively.
-    """
     source_w, source_h = _source_dimensions(str(Path(source_path).resolve()))
     if source_w <= 0 or source_h <= 0:
         return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
 
     crop_w, crop_h = crop_geometry(source_w, source_h, width, height)
     center = f"crop@focus=w={crop_w}:h={crop_h}:x=(iw-ow)/2:y=(ih-oh)/2,scale={width}:{height},setsar=1"
-
-    # Horizontal movement matters when the target format is narrower than the
-    # source (the dominant 16:9 -> 9:16 creator workflow). If there is no useful
-    # horizontal crop, skip detection entirely.
     if crop_w >= source_w - 2:
         return center
 
@@ -131,6 +79,15 @@ def _mode_for(cue: VisualCue, ratio: str, index: int, requested: str) -> str:
     return ordered[index % len(ordered)] if ordered else "pip"
 
 
+def _logo_position(brand: BrandKit, margin: int) -> str:
+    return {
+        "top-left": f"{margin}:{margin}",
+        "top-right": f"W-w-{margin}:{margin}",
+        "bottom-left": f"{margin}:H-h-{margin}",
+        "bottom-right": f"W-w-{margin}:H-h-{margin}",
+    }.get(brand.logo_position, f"W-w-{margin}:{margin}")
+
+
 def render_clip(
     source_path: str | Path,
     candidate: ClipCandidate,
@@ -140,57 +97,117 @@ def render_clip(
     *,
     ratio: str = "9:16",
     layout_mode: str = "auto",
+    brand: BrandKit | None = None,
+    caption_preset: str | None = None,
+    hook_text: str | None = None,
+    music_path: str | None = None,
 ) -> RenderedVariant:
     if ratio not in ASPECT_PRESETS:
         raise ValueError(f"Unsupported aspect ratio: {ratio}")
+    brand = brand or BrandKit()
     width, height = ASPECT_PRESETS[ratio]
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    ass_path = write_ass(transcript_words, candidate, out.with_suffix(".ass"), width, height)
+    ass_path = write_captions(
+        transcript_words,
+        candidate,
+        out.with_suffix(".ass"),
+        width,
+        height,
+        brand,
+        preset=caption_preset,
+        hook_text=hook_text,
+    )
 
     usable = [cue for cue in cues if cue.asset_path and Path(cue.asset_path).is_file()]
+    logo_path = Path(brand.logo_path).expanduser() if brand.logo_path else None
+    if logo_path and not logo_path.is_file():
+        logo_path = None
+    music = Path(music_path).expanduser() if music_path else None
+    if music and not music.is_file():
+        music = None
+
     cmd = [
         "ffmpeg", "-y", "-v", "warning",
         "-ss", f"{candidate.start:.3f}", "-t", f"{candidate.duration:.3f}", "-i", str(source_path),
     ]
+    input_index = 1
+    visual_inputs: list[int] = []
     for cue in usable:
         cmd += ["-loop", "1", "-framerate", "30", "-i", str(cue.asset_path)]
+        visual_inputs.append(input_index)
+        input_index += 1
+    logo_index = None
+    if logo_path:
+        cmd += ["-loop", "1", "-framerate", "30", "-i", str(logo_path)]
+        logo_index = input_index
+        input_index += 1
+    music_index = None
+    if music:
+        cmd += music_input_args(music)
+        music_index = input_index
+        input_index += 1
 
     base_filter = _base_filter(source_path, candidate, width, height, out)
     filters = [f"[0:v]{base_filter}[base0]"]
     previous = "base0"
-    for i, cue in enumerate(usable, 1):
-        mode = _mode_for(cue, ratio, i - 1, layout_mode)
-        visual = f"vis{i}"
-        nxt = f"base{i}"
+    for position, (cue, source_index) in enumerate(zip(usable, visual_inputs), 1):
+        mode = _mode_for(cue, ratio, position - 1, layout_mode)
+        visual = f"vis{position}"
+        nxt = f"base{position}"
         start = max(0.0, cue.start)
         end = min(candidate.duration, max(start + 0.3, cue.end))
         enable = f"enable='between(t,{start:.3f},{end:.3f})'"
         if mode == "interrupt":
-            filters.append(f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1[{visual}]")
+            filters.append(f"[{source_index}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1[{visual}]")
             filters.append(f"[{previous}][{visual}]overlay=0:0:{enable}[{nxt}]")
         elif mode == "split":
             if height >= width:
                 panel_h = int(height * 0.43)
-                filters.append(f"[{i}:v]scale={width}:{panel_h}:force_original_aspect_ratio=increase,crop={width}:{panel_h},setsar=1[{visual}]")
+                filters.append(f"[{source_index}:v]scale={width}:{panel_h}:force_original_aspect_ratio=increase,crop={width}:{panel_h},setsar=1[{visual}]")
                 filters.append(f"[{previous}][{visual}]overlay=0:0:{enable}[{nxt}]")
             else:
                 panel_w = int(width * 0.42)
-                filters.append(f"[{i}:v]scale={panel_w}:{height}:force_original_aspect_ratio=increase,crop={panel_w}:{height},setsar=1[{visual}]")
+                filters.append(f"[{source_index}:v]scale={panel_w}:{height}:force_original_aspect_ratio=increase,crop={panel_w}:{height},setsar=1[{visual}]")
                 filters.append(f"[{previous}][{visual}]overlay=W-w:0:{enable}[{nxt}]")
         else:
             pip_w = int(width * (0.42 if height >= width else 0.34))
-            filters.append(f"[{i}:v]scale={pip_w}:-2:force_original_aspect_ratio=decrease,setsar=1[{visual}]")
+            filters.append(f"[{source_index}:v]scale={pip_w}:-2:force_original_aspect_ratio=decrease,setsar=1[{visual}]")
             margin = max(24, int(min(width, height) * 0.025))
             filters.append(f"[{previous}][{visual}]overlay=W-w-{margin}:{margin}:{enable}[{nxt}]")
         previous = nxt
 
+    if logo_index is not None:
+        logo_label = "brandlogo"
+        nxt = "brandbase"
+        logo_w = max(90, int(width * (0.13 if height >= width else 0.10)))
+        margin = max(24, int(min(width, height) * 0.025))
+        filters.append(f"[{logo_index}:v]scale={logo_w}:-2,format=rgba[{logo_label}]")
+        filters.append(f"[{previous}][{logo_label}]overlay={_logo_position(brand, margin)}:format=auto[{nxt}]")
+        previous = nxt
+
     ass = _escape_filter_path(ass_path)
     filters.append(f"[{previous}]subtitles='{ass}'[vout]")
-    cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "0:a?"]
+
+    source_has_audio = has_audio(source_path)
+    audio_map: list[str] = []
+    audio_codec: list[str] = []
+    if music_index is not None and source_has_audio:
+        filters.extend(music_mix_filters(music_index))
+        audio_map = ["-map", "[aout]"]
+        audio_codec = ["-c:a", "aac", "-b:a", "192k"]
+    elif music_index is not None:
+        filters.append(f"[{music_index}:a]aresample=48000,volume=0.22,loudnorm=I=-14:TP=-2.0:LRA=11[aout]")
+        audio_map = ["-map", "[aout]"]
+        audio_codec = ["-c:a", "aac", "-b:a", "192k"]
+    elif source_has_audio:
+        audio_map = ["-map", "0:a:0"]
+        audio_codec = [*audio_encode_args(), "-b:a", "192k"]
+
+    cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]", *audio_map]
     cmd += video_encode_args(DELIVERY)
-    cmd += audio_encode_args()
-    cmd += ["-b:a", "192k", "-movflags", "+faststart", "-pix_fmt", "yuv420p"]
+    cmd += audio_codec
+    cmd += ["-movflags", "+faststart", "-pix_fmt", "yuv420p"]
     cmd += METADATA_SCRUB
     cmd += ["-t", f"{candidate.duration:.3f}", str(out)]
 
@@ -200,7 +217,7 @@ def render_clip(
         raise RuntimeError("ffmpeg is required to render clips") from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"ffmpeg render failed for {candidate.id} {ratio}: {exc}") from exc
-    return RenderedVariant(candidate.id, ratio, str(out), width, height)
+    return RenderedVariant(candidate.id, ratio, str(out), width, height, layout_mode=layout_mode)
 
 
 def render_variants(
@@ -212,13 +229,11 @@ def render_variants(
     ratios: list[str],
     *,
     layout_modes: list[str] | None = None,
+    brand: BrandKit | None = None,
+    caption_preset: str | None = None,
+    hook_text: str | None = None,
+    music_path: str | None = None,
 ) -> list[RenderedVariant]:
-    """Render aspect-ratio variants and optional alternate edit compositions.
-
-    Independent FFmpeg jobs can run concurrently. Keep the default conservative
-    (2) so CPU desktops stay responsive and consumer NVENC session limits are not
-    hammered; set RENDER_WORKERS=1 for strictly serial output.
-    """
     modes = layout_modes or ["auto"]
     specs: list[tuple[str, str, Path]] = []
     for ratio in ratios:
@@ -233,7 +248,19 @@ def render_variants(
 
     def run(spec: tuple[str, str, Path]) -> RenderedVariant:
         ratio, mode, path = spec
-        return render_clip(source_path, candidate, transcript_words, cues, path, ratio=ratio, layout_mode=mode)
+        return render_clip(
+            source_path,
+            candidate,
+            transcript_words,
+            cues,
+            path,
+            ratio=ratio,
+            layout_mode=mode,
+            brand=brand,
+            caption_preset=caption_preset,
+            hook_text=hook_text,
+            music_path=music_path,
+        )
 
     if workers == 1:
         return [run(spec) for spec in specs]
