@@ -75,6 +75,10 @@ def _removals_for_words(
     return silence, fillers
 
 
+def _removed_seconds(ranges: list[tuple[float, float]]) -> float:
+    return sum(max(0.0, end - start) for start, end in ranges)
+
+
 def build_keep_intervals(
     candidate: ClipCandidate,
     words: list[Word],
@@ -84,9 +88,15 @@ def build_keep_intervals(
     remove_fillers: bool = True,
     max_removed_ratio: float = 0.35,
 ) -> list[KeepInterval]:
-    """Create a conservative edit decision list for talking-head cleanup."""
+    """Create a conservative edit decision list for talking-head cleanup.
+
+    The damage budget is hard: if even silence-only cleanup would remove more
+    than ``max_removed_ratio`` of the selected clip, cleanup is disabled for that
+    clip rather than aggressively collapsing sparse/uncertain transcription.
+    """
     if candidate.duration <= 0:
         return []
+    full = [KeepInterval(candidate.start, candidate.end)]
     silence, fillers = _removals_for_words(
         candidate,
         words,
@@ -95,9 +105,11 @@ def build_keep_intervals(
         remove_fillers=remove_fillers,
     )
     removals = _merge_ranges(silence + fillers)
-    removed = sum(end - start for start, end in removals)
-    if removed / candidate.duration > max_removed_ratio:
+    budget = max(0.0, min(0.9, float(max_removed_ratio))) * candidate.duration
+    if _removed_seconds(removals) > budget:
         removals = _merge_ranges(silence)
+    if _removed_seconds(removals) > budget:
+        return full
 
     cursor = candidate.start
     keep: list[KeepInterval] = []
@@ -110,7 +122,7 @@ def build_keep_intervals(
     if candidate.end - cursor >= 0.10:
         keep.append(KeepInterval(cursor, candidate.end))
     if not keep:
-        return [KeepInterval(candidate.start, candidate.end)]
+        return full
 
     compact: list[KeepInterval] = []
     for interval in keep:
@@ -118,7 +130,7 @@ def build_keep_intervals(
             compact[-1] = KeepInterval(compact[-1].start, interval.end)
         else:
             compact.append(interval)
-    return compact
+    return compact or full
 
 
 def compact_duration(intervals: list[KeepInterval]) -> float:
