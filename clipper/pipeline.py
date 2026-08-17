@@ -148,6 +148,22 @@ def _prepare_candidate(
     return source, local_candidate, mapped, interval_dicts, punch_dicts
 
 
+def _asset_fingerprint(value: str | None) -> dict | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_file():
+        return None
+    try:
+        return {
+            "path": str(path.resolve()),
+            "fingerprint": file_fingerprint(path, sample_bytes=256 * 1024),
+        }
+    except Exception:
+        stat = path.stat()
+        return {"path": str(path.resolve()), "size": stat.st_size, "mtime": stat.st_mtime_ns}
+
+
 def _render_signature(
     source: Path,
     candidate: ClipCandidate,
@@ -159,23 +175,14 @@ def _render_signature(
 ) -> str:
     cue_payload = []
     for cue in cues:
-        asset = cue.asset_path
-        asset_stamp = None
-        if asset and Path(asset).is_file():
-            stat = Path(asset).stat()
-            asset_stamp = [str(Path(asset).resolve()), stat.st_size, stat.st_mtime_ns]
         cue_payload.append({
             "start": cue.start,
             "end": cue.end,
             "query": cue.query,
             "modes": cue.modes,
-            "asset": asset_stamp,
+            "asset": _asset_fingerprint(cue.asset_path),
         })
-    music_stamp = None
-    if music_path and Path(music_path).expanduser().is_file():
-        p = Path(music_path).expanduser()
-        s = p.stat()
-        music_stamp = [str(p.resolve()), s.st_size, s.st_mtime_ns]
+    logo_path = str(brand.get("logo_path") or "") if isinstance(brand, dict) else ""
     return stable_hash({
         "source": file_fingerprint(source),
         "candidate": asdict(candidate),
@@ -183,8 +190,9 @@ def _render_signature(
         "layout_modes": item.get("layout_modes"),
         "caption_preset": item.get("caption_preset"),
         "brand": brand,
+        "logo": _asset_fingerprint(logo_path),
         "hook": hook_text,
-        "music": music_stamp,
+        "music": _asset_fingerprint(music_path),
         "cues": cue_payload,
     })
 
@@ -200,7 +208,8 @@ def _load_cached_variants(path: Path, signature: str) -> list[RenderedVariant] |
         return None
     result = []
     for raw in data.get("variants") or []:
-        if not Path(raw.get("path", "")).is_file():
+        artifact = Path(raw.get("path", ""))
+        if not artifact.is_file() or artifact.stat().st_size < 10_000:
             return None
         result.append(RenderedVariant(**raw))
     return result or None
