@@ -93,7 +93,6 @@ class FirebaseBridge:
         return None
 
     def _renew_lease(self, reference) -> str | None:
-        """Transactionally renew only if this worker still owns an active job."""
         transaction = self.db.transaction()
         firestore = self.firestore
 
@@ -120,9 +119,6 @@ class FirebaseBridge:
             try:
                 status = self._renew_lease(ref)
             except Exception as exc:
-                # A transient Firestore failure is not proof that ownership was
-                # lost. Keep trying; another worker can only claim after a
-                # transaction actually expires/requeues this lease.
                 print(f"[firebase-worker] heartbeat warning for {job_id}: {exc}")
                 continue
             if status is None:
@@ -143,7 +139,6 @@ class FirebaseBridge:
         return status
 
     def _transition_owned(self, reference, new_status: str, allowed_states: set[str]) -> bool:
-        """Atomically change job state only while this worker owns the lease."""
         transaction = self.db.transaction()
         firestore = self.firestore
 
@@ -155,10 +150,7 @@ class FirebaseBridge:
             data = snapshot.to_dict() or {}
             if data.get("workerId") != self.worker_id or data.get("status") not in allowed_states:
                 return False
-            payload = {
-                "status": new_status,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            }
+            payload = {"status": new_status, "updatedAt": firestore.SERVER_TIMESTAMP}
             if new_status in self.ACTIVE_STATES:
                 payload["leaseExpiresAt"] = datetime.now(timezone.utc) + timedelta(minutes=3)
             else:
@@ -191,7 +183,6 @@ class FirebaseBridge:
         return bool(fail(transaction, reference))
 
     def _requeue_if_expired(self, reference, now: datetime) -> bool:
-        """Transactionally re-check a stale lease before returning a job to queue."""
         transaction = self.db.transaction()
         firestore = self.firestore
 
@@ -287,6 +278,9 @@ class FirebaseBridge:
 
     def _settings_for_job(self, job: dict, music: str | None, logo: str | None) -> Settings:
         settings = replace(self.settings)
+        mode = str(job.get("automationMode") or settings.automation_mode).strip().lower()
+        if mode in {"auto", "manual"}:
+            settings.automation_mode = mode
         if "smartCut" in job:
             settings.smart_cut = bool(job.get("smartCut"))
         if "removeFillers" in job:
@@ -379,6 +373,25 @@ class FirebaseBridge:
         self.bucket.blob(remote).upload_from_filename(manifest.edit_plan_path, content_type="application/json", timeout=120)
         return remote
 
+    def _upload_stage_report(
+        self,
+        job: dict,
+        manifest,
+        ownership_check: Callable[[], None] | None = None,
+    ) -> str | None:
+        if not manifest.stage_report_path or not Path(manifest.stage_report_path).is_file():
+            return None
+        if ownership_check:
+            ownership_check()
+        user_id = str(job.get("userId") or "")
+        remote = f"users/{user_id}/projects/{job['id']}/automation_report.json"
+        self.bucket.blob(remote).upload_from_filename(
+            manifest.stage_report_path,
+            content_type="application/json",
+            timeout=120,
+        )
+        return remote
+
     def _publish_outputs(
         self,
         job: dict,
@@ -453,7 +466,6 @@ class FirebaseBridge:
         return results, errors
 
     def _finalize_owned(self, job: dict, reference, project: dict, job_updates: dict) -> bool:
-        """Atomically publish the project record and mark the owning job done."""
         transaction = self.db.transaction()
         firestore = self.firestore
         project_ref = self.db.collection("clipperProjects").document(job["id"])
@@ -516,6 +528,7 @@ class FirebaseBridge:
             self._worker_state("uploading", job_id)
             outputs = self._upload_outputs(job, manifest, ownership_check)
             edit_plan_storage_path = self._upload_edit_plan(job, manifest, ownership_check)
+            stage_report_storage_path = self._upload_stage_report(job, manifest, ownership_check)
 
             publish_results: list[dict] = []
             publish_errors: list[str] = []
@@ -535,6 +548,7 @@ class FirebaseBridge:
                     "smartCutIntervals": clip.get("smart_cut_intervals"),
                     "punchIns": clip.get("punch_ins"),
                     "visualCues": clip.get("visual_cues") or [],
+                    "autoProfile": clip.get("auto_profile") or {},
                 }
                 for index, clip in enumerate(manifest.clips)
             }
@@ -548,6 +562,8 @@ class FirebaseBridge:
                 "outputs": outputs,
                 "clipMetadata": clip_metadata,
                 "editPlanStoragePath": edit_plan_storage_path,
+                "stageReportStoragePath": stage_report_storage_path,
+                "automationMode": manifest.automation_mode,
                 "hardwareProfile": manifest.hardware_profile,
                 "clipCount": len(manifest.clips),
                 "status": "done",
@@ -564,6 +580,8 @@ class FirebaseBridge:
                 {
                     "outputs": outputs,
                     "editPlanStoragePath": edit_plan_storage_path,
+                    "stageReportStoragePath": stage_report_storage_path,
+                    "automationMode": manifest.automation_mode,
                     "publishResults": publish_results,
                     "publishErrors": publish_errors,
                 },
