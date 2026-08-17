@@ -27,11 +27,12 @@ This file is the canonical engineering backlog for the next Clipper sessions. Co
 - [x] Provider failures degrade to the next configured source rather than failing the whole edit.
 - [x] Local API heavy jobs are serialized by default to avoid competing GPU/FFmpeg workloads on one workstation.
 - [x] Local API uploads are byte-bounded, chunk-staged, and atomically finalized; unsupported arbitrary remote URLs are rejected before processing.
+- [x] Local API staged media is FFprobed before expensive work so unreadable or wrong-stream uploads fail early.
 - [x] Local API media serving exposes only finished project clip media instead of mounting the entire work directory.
 - [x] Firebase stale-job recovery transactionally re-checks the lease before requeueing, removing the heartbeat/requeue race.
 - [x] Firebase inbox downloads are atomic and per-job temporary inbox data is removed after processing.
 - [x] Firebase project records retain B-roll visual-cue provenance for the web library.
-- [x] Browser upload failures clean up already-uploaded Firebase source objects instead of leaving orphaned blobs.
+- [x] Browser upload failures clean up already-uploaded Firebase source objects without deleting blobs for an ambiguously committed queue write.
 - [x] Firebase Storage rules allow client writes only to the user's source inbox; worker-produced project outputs are client read-only.
 
 ---
@@ -305,7 +306,7 @@ The first goal is one proven phone -> Firebase -> A4000 desktop -> Firebase -> b
 - [ ] Authentication if FastAPI is reachable beyond localhost.
 - [x] Serve only explicitly allowed finished project media; do not mount the complete work directory.
 - [x] Bound local upload byte size and stage uploads atomically.
-- [ ] Validate uploaded media types/content with probing before expensive work.
+- [x] Validate uploaded media types/content with probing before expensive work.
 - [ ] Appropriate request/job rate limits if the API is exposed beyond localhost.
 - [x] Prevent browser clients from overwriting worker-produced Firebase project outputs.
 - [ ] Evaluate Firebase App Check for the hosted uploader.
