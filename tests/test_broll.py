@@ -41,6 +41,28 @@ def test_local_library_resolves_semantically_related_asset(tmp_path: Path):
     assert resolved[0].attribution["license"] == "owned"
 
 
+def test_auto_broll_does_not_repeat_exact_same_asset_in_one_clip(tmp_path: Path):
+    library = tmp_path / "library"
+    library.mkdir()
+    coffee = library / "coffee-roasting.mp4"
+    coffee.write_bytes(b"same-owned-video" * 300)
+    settings = Settings(
+        workdir=tmp_path / "data",
+        visual_provider="auto",
+        broll_providers=("local",),
+        broll_library_path=str(library),
+        broll_min_relevance=0.2,
+    )
+    cues = [
+        VisualCue(0.0, 2.0, "Coffee roasting starts here.", "coffee roasting", ""),
+        VisualCue(3.0, 5.0, "More coffee roasting detail.", "coffee roasting", ""),
+    ]
+    resolved = resolve_broll(cues, tmp_path / "project" / "visuals", settings)
+    assert resolved[0].asset_path
+    assert resolved[0].provider == "local"
+    assert resolved[1].asset_path is None
+
+
 def test_manual_broll_asset_is_never_replaced(tmp_path: Path):
     manual = tmp_path / "manual.mp4"
     manual.write_bytes(b"manual" * 1000)
