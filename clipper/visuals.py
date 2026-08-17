@@ -38,11 +38,36 @@ def _read_attribution(path: Path) -> dict:
         return {}
 
 
-def _write_bytes_atomic(path: Path, content: bytes) -> None:
+def _stream_to_atomic_file(client: httpx.Client, url: str, path: Path, max_bytes: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".part")
-    temp.write_bytes(content)
-    os.replace(temp, path)
+    temp.unlink(missing_ok=True)
+    total = 0
+    try:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            declared = int(response.headers.get("content-length") or 0)
+            if declared and declared > max_bytes:
+                raise RuntimeError(
+                    f"Commons image is {declared / (1024 * 1024):.1f} MB; "
+                    f"limit is {max_bytes / (1024 * 1024):.0f} MB"
+                )
+            with temp.open("wb") as handle:
+                for chunk in response.iter_bytes(1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(
+                            f"Commons image download exceeded {max_bytes / (1024 * 1024):.0f} MB"
+                        )
+                    handle.write(chunk)
+        if total <= 0:
+            raise RuntimeError("Commons image download was empty")
+        os.replace(temp, path)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | None, dict]:
@@ -59,7 +84,13 @@ def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | N
     return None, {}
 
 
-def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tuple[Path | None, dict]:
+def pull_commons_image(
+    query: str,
+    output_dir: str | Path,
+    index: int = 0,
+    *,
+    max_bytes: int = 80 * 1024 * 1024,
+) -> tuple[Path | None, dict]:
     """Pull a reusable raster image from Wikimedia Commons and cache it locally."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -67,6 +98,7 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
     if cached is not None:
         return cached, attribution
 
+    max_bytes = max(1024 * 1024, int(max_bytes))
     params = {
         "action": "query", "format": "json", "generator": "search",
         "gsrsearch": query, "gsrnamespace": "6", "gsrlimit": "8",
@@ -95,9 +127,7 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
         }.get(str(info.get("mime")), ".jpg")
         key = _cache_key(f"{query}\0{index}")
         path = out / f"commons-{_safe_name(query)}-{key}{suffix}"
-        media = client.get(str(info["url"]))
-        media.raise_for_status()
-        _write_bytes_atomic(path, media.content)
+        _stream_to_atomic_file(client, str(info["url"]), path, max_bytes)
 
         meta = info.get("extmetadata") or {}
         attribution = {
