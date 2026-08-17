@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .config import Settings
@@ -17,6 +18,12 @@ def _settings_from_args(args) -> Settings:
         settings.brand_kit_path = args.brand
     if getattr(args, "music", None):
         settings.music_path = args.music
+    caption_preset = getattr(args, "caption_preset", None)
+    if caption_preset:
+        settings.caption_preset = caption_preset
+        # The default BrandKit is environment-derived when no explicit brand file
+        # exists, so mirror this CLI override for the current process only.
+        os.environ["CAPTION_PRESET"] = caption_preset
     if getattr(args, "no_smart_cut", False):
         settings.smart_cut = False
     if getattr(args, "keep_fillers", False):
@@ -85,6 +92,7 @@ def _publish(args) -> None:
 def _add_edit_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--brand", help="Path to brand-kit JSON")
     parser.add_argument("--music", help="Optional background music file")
+    parser.add_argument("--caption-preset", choices=["karaoke", "clean", "minimal"], help="Override caption style when no brand kit supplies one")
     parser.add_argument("--no-smart-cut", action="store_true", help="Do not tighten pauses")
     parser.add_argument("--keep-fillers", action="store_true", help="Keep filler words even when a clean cut is available")
     parser.add_argument("--no-punch-ins", action="store_true", help="Disable automatic emphasis zooms")
