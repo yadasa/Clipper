@@ -51,6 +51,7 @@ class ClipCandidate:
     title: str
     reason: str = ""
     transcript: str = ""
+    metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -88,6 +89,8 @@ class RenderedVariant:
     path: str
     width: int
     height: int
+    layout_mode: str = "auto"
+    thumbnail_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -98,6 +101,8 @@ class ProjectManifest:
     created_at: str
     ratios: list[str]
     transcript_path: str | None = None
+    edit_plan_path: str | None = None
+    hardware_profile: dict[str, Any] = field(default_factory=dict)
     clips: list[dict[str, Any]] = field(default_factory=list)
     status: str = "created"
     error: str | None = None
