@@ -9,11 +9,16 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from .config import Settings
 from .media import is_social_url
 from .pipeline import process_video
 from .publish import PREFERRED_RATIO, UploadPostPublisher
+
+
+class LeaseLostError(RuntimeError):
+    """Raised when a worker no longer owns a Firebase job lease."""
 
 
 class FirebaseBridge:
@@ -87,26 +92,106 @@ class FirebaseBridge:
                 return job
         return None
 
-    def _heartbeat(self, job_id: str, stop: threading.Event) -> None:
+    def _renew_lease(self, reference) -> str | None:
+        """Transactionally renew only if this worker still owns an active job."""
+        transaction = self.db.transaction()
+        firestore = self.firestore
+
+        @firestore.transactional
+        def renew(transaction, reference):
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+            data = snapshot.to_dict() or {}
+            status = str(data.get("status") or "")
+            if data.get("workerId") != self.worker_id or status not in self.ACTIVE_STATES:
+                return None
+            transaction.update(reference, {
+                "leaseExpiresAt": datetime.now(timezone.utc) + timedelta(minutes=3),
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
+            return status
+
+        return renew(transaction, reference)
+
+    def _heartbeat(self, job_id: str, stop: threading.Event, lost: threading.Event) -> None:
         ref = self.db.collection("clipperJobs").document(job_id)
         while not stop.wait(45):
-            snapshot = ref.get()
+            try:
+                status = self._renew_lease(ref)
+            except Exception as exc:
+                # A transient Firestore failure is not proof that ownership was
+                # lost. Keep trying; another worker can only claim after a
+                # transaction actually expires/requeues this lease.
+                print(f"[firebase-worker] heartbeat warning for {job_id}: {exc}")
+                continue
+            if status is None:
+                lost.set()
+                return
+            self._worker_state(status, job_id)
+
+    def _assert_owned(self, reference, lost: threading.Event | None = None) -> str:
+        if lost is not None and lost.is_set():
+            raise LeaseLostError("Firebase job lease was lost")
+        snapshot = reference.get()
+        data = snapshot.to_dict() or {}
+        status = str(data.get("status") or "")
+        if data.get("workerId") != self.worker_id or status not in self.ACTIVE_STATES:
+            if lost is not None:
+                lost.set()
+            raise LeaseLostError("Firebase job is no longer owned by this worker")
+        return status
+
+    def _transition_owned(self, reference, new_status: str, allowed_states: set[str]) -> bool:
+        """Atomically change job state only while this worker owns the lease."""
+        transaction = self.db.transaction()
+        firestore = self.firestore
+
+        @firestore.transactional
+        def transition(transaction, reference):
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("workerId") != self.worker_id or data.get("status") not in allowed_states:
+                return False
+            payload = {
+                "status": new_status,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+            if new_status in self.ACTIVE_STATES:
+                payload["leaseExpiresAt"] = datetime.now(timezone.utc) + timedelta(minutes=3)
+            else:
+                payload["leaseExpiresAt"] = None
+            transaction.update(reference, payload)
+            return True
+
+        return bool(transition(transaction, reference))
+
+    def _fail_if_owned(self, reference, error: Exception) -> bool:
+        transaction = self.db.transaction()
+        firestore = self.firestore
+
+        @firestore.transactional
+        def fail(transaction, reference):
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
             data = snapshot.to_dict() or {}
             if data.get("workerId") != self.worker_id or data.get("status") not in self.ACTIVE_STATES:
-                return
-            ref.update({
-                "leaseExpiresAt": datetime.now(timezone.utc) + timedelta(minutes=3),
-                "updatedAt": self.firestore.SERVER_TIMESTAMP,
+                return False
+            transaction.update(reference, {
+                "status": "failed",
+                "lastError": str(error)[:4000],
+                "leaseExpiresAt": None,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
             })
-            self._worker_state(data.get("status", "processing"), job_id)
+            return True
+
+        return bool(fail(transaction, reference))
 
     def _requeue_if_expired(self, reference, now: datetime) -> bool:
-        """Transactionally re-check a stale lease before returning a job to queue.
-
-        The query that found the document can race a heartbeat. Reading it again
-        inside a Firestore transaction prevents an active worker from being
-        requeued after it has already renewed its lease.
-        """
+        """Transactionally re-check a stale lease before returning a job to queue."""
         transaction = self.db.transaction()
         firestore = self.firestore
 
@@ -230,7 +315,12 @@ class FirebaseBridge:
             settings.brand_kit_path = str(brand_path)
         return settings
 
-    def _upload_outputs(self, job: dict, manifest) -> list[dict]:
+    def _upload_outputs(
+        self,
+        job: dict,
+        manifest,
+        ownership_check: Callable[[], None] | None = None,
+    ) -> list[dict]:
         user_id = str(job.get("userId") or "")
         if not user_id:
             raise RuntimeError("Firebase job has no userId")
@@ -240,6 +330,8 @@ class FirebaseBridge:
             candidate = clip.get("candidate", {})
             metadata = clip.get("social_metadata") or {}
             for variant in clip.get("variants", []):
+                if ownership_check:
+                    ownership_check()
                 local = Path(variant["path"])
                 if not local.is_file():
                     continue
@@ -251,6 +343,8 @@ class FirebaseBridge:
                 thumb_remote = None
                 thumbnail_path = variant.get("thumbnail_path")
                 if thumbnail_path and Path(thumbnail_path).is_file():
+                    if ownership_check:
+                        ownership_check()
                     thumb = Path(thumbnail_path)
                     thumb_remote = f"{remote_dir}/{thumb.name}"
                     self.bucket.blob(thumb_remote).upload_from_filename(str(thumb), content_type="image/jpeg", timeout=120)
@@ -270,15 +364,27 @@ class FirebaseBridge:
                 })
         return outputs
 
-    def _upload_edit_plan(self, job: dict, manifest) -> str | None:
+    def _upload_edit_plan(
+        self,
+        job: dict,
+        manifest,
+        ownership_check: Callable[[], None] | None = None,
+    ) -> str | None:
         if not manifest.edit_plan_path or not Path(manifest.edit_plan_path).is_file():
             return None
+        if ownership_check:
+            ownership_check()
         user_id = str(job.get("userId") or "")
         remote = f"users/{user_id}/projects/{job['id']}/edit_plan.json"
         self.bucket.blob(remote).upload_from_filename(manifest.edit_plan_path, content_type="application/json", timeout=120)
         return remote
 
-    def _publish_outputs(self, job: dict, manifest) -> tuple[list[dict], list[str]]:
+    def _publish_outputs(
+        self,
+        job: dict,
+        manifest,
+        ownership_check: Callable[[], None] | None = None,
+    ) -> tuple[list[dict], list[str]]:
         platforms = []
         for value in job.get("publishPlatforms") or []:
             name = str(value).strip().lower()
@@ -304,6 +410,8 @@ class FirebaseBridge:
                 ratio = PREFERRED_RATIO.get(platform, "9:16")
                 by_ratio.setdefault(ratio, []).append(platform)
             for ratio, group in by_ratio.items():
+                if ownership_check:
+                    ownership_check()
                 matches = [
                     variant
                     for variant in variants
@@ -338,21 +446,59 @@ class FirebaseBridge:
                         "aspectRatio": variant.get("aspect_ratio"),
                         "result": response,
                     })
+                except LeaseLostError:
+                    raise
                 except Exception as exc:
                     errors.append(f"{candidate.get('id', 'clip')} -> {', '.join(group)}: {exc}")
         return results, errors
+
+    def _finalize_owned(self, job: dict, reference, project: dict, job_updates: dict) -> bool:
+        """Atomically publish the project record and mark the owning job done."""
+        transaction = self.db.transaction()
+        firestore = self.firestore
+        project_ref = self.db.collection("clipperProjects").document(job["id"])
+
+        @firestore.transactional
+        def finalize(transaction, reference, project_ref):
+            snapshot = reference.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("workerId") != self.worker_id or data.get("status") not in {"uploading", "publishing"}:
+                return False
+            transaction.set(project_ref, project)
+            payload = dict(job_updates)
+            payload.update({
+                "status": "done",
+                "leaseExpiresAt": None,
+                "completedAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
+            transaction.update(reference, payload)
+            return True
+
+        return bool(finalize(transaction, reference, project_ref))
 
     def process_job(self, job: dict) -> None:
         job_id = job["id"]
         ref = self.db.collection("clipperJobs").document(job_id)
         stop = threading.Event()
-        heartbeat = threading.Thread(target=self._heartbeat, args=(job_id, stop), daemon=True)
+        lost = threading.Event()
+        heartbeat = threading.Thread(target=self._heartbeat, args=(job_id, stop, lost), daemon=True)
         heartbeat.start()
         self._worker_state("processing", job_id)
+
+        def ownership_check() -> None:
+            self._assert_owned(ref, lost)
+
         try:
-            ref.update({"status": "processing", "updatedAt": self.firestore.SERVER_TIMESTAMP})
+            if not self._transition_owned(ref, "processing", {"claimed", "processing"}):
+                lost.set()
+                raise LeaseLostError("Firebase job lease was lost before processing started")
             source = self._source_value(job)
+            ownership_check()
             cameras, external_audio, music, logo = self._download_extras(job)
+            ownership_check()
             job_settings = self._settings_for_job(job, music, logo)
             manifest = process_video(
                 source,
@@ -363,18 +509,24 @@ class FirebaseBridge:
                 external_audio=external_audio,
                 alternate_visual_layouts=bool(job.get("alternateVisualLayouts", False)),
             )
-            ref.update({"status": "uploading", "updatedAt": self.firestore.SERVER_TIMESTAMP})
+            ownership_check()
+            if not self._transition_owned(ref, "uploading", {"processing"}):
+                lost.set()
+                raise LeaseLostError("Firebase job lease was lost before upload")
             self._worker_state("uploading", job_id)
-            outputs = self._upload_outputs(job, manifest)
-            edit_plan_storage_path = self._upload_edit_plan(job, manifest)
+            outputs = self._upload_outputs(job, manifest, ownership_check)
+            edit_plan_storage_path = self._upload_edit_plan(job, manifest, ownership_check)
 
             publish_results: list[dict] = []
             publish_errors: list[str] = []
             if job.get("publishPlatforms"):
-                ref.update({"status": "publishing", "updatedAt": self.firestore.SERVER_TIMESTAMP})
+                if not self._transition_owned(ref, "publishing", {"uploading"}):
+                    lost.set()
+                    raise LeaseLostError("Firebase job lease was lost before publishing")
                 self._worker_state("publishing", job_id)
-                publish_results, publish_errors = self._publish_outputs(job, manifest)
+                publish_results, publish_errors = self._publish_outputs(job, manifest, ownership_check)
 
+            ownership_check()
             clip_metadata = {
                 str((clip.get("candidate") or {}).get("id") or index): {
                     "candidate": clip.get("candidate"),
@@ -405,22 +557,25 @@ class FirebaseBridge:
                 "createdAt": job.get("createdAt"),
                 "completedAt": self.firestore.SERVER_TIMESTAMP,
             }
-            self.db.collection("clipperProjects").document(job_id).set(project)
-            ref.update({
-                "status": "done",
-                "outputs": outputs,
-                "editPlanStoragePath": edit_plan_storage_path,
-                "publishResults": publish_results,
-                "publishErrors": publish_errors,
-                "completedAt": self.firestore.SERVER_TIMESTAMP,
-                "updatedAt": self.firestore.SERVER_TIMESTAMP,
-            })
+            if not self._finalize_owned(
+                job,
+                ref,
+                project,
+                {
+                    "outputs": outputs,
+                    "editPlanStoragePath": edit_plan_storage_path,
+                    "publishResults": publish_results,
+                    "publishErrors": publish_errors,
+                },
+            ):
+                lost.set()
+                raise LeaseLostError("Firebase job lease was lost before finalization")
+        except LeaseLostError as exc:
+            lost.set()
+            print(f"[firebase-worker] {job_id}: {exc}; stopping stale worker side effects")
+            return
         except Exception as exc:
-            ref.update({
-                "status": "failed",
-                "lastError": str(exc)[:4000],
-                "updatedAt": self.firestore.SERVER_TIMESTAMP,
-            })
+            self._fail_if_owned(ref, exc)
             raise
         finally:
             stop.set()
