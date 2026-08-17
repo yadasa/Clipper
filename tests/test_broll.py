@@ -37,7 +37,7 @@ def test_local_library_resolves_semantically_related_asset(tmp_path: Path):
     assert resolved[0].provider == "local"
     assert resolved[0].asset_type == "video"
     assert Path(resolved[0].asset_path).is_file()
-    assert "coffee" in Path(resolved[0].asset_path).name
+    assert "coffee-beans-roasting.mp4" in resolved[0].attribution["original_path"]
     assert resolved[0].attribution["license"] == "owned"
 
 
