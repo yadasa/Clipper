@@ -1,5 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -142,3 +144,35 @@ def test_render_batch_aligns_visual_cues_once(tmp_path: Path, monkeypatch):
     )
     assert len(variants) == 2
     assert calls == {"align": 1, "render": 2}
+
+
+def test_parallel_face_tracking_shares_one_analysis(tmp_path: Path, monkeypatch):
+    import clipper.focus as focus_module
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video-placeholder")
+    entered = threading.Event()
+    release = threading.Event()
+    calls = {"count": 0}
+
+    with focus_module._cache_lock:
+        focus_module._cache.clear()
+        focus_module._inflight.clear()
+
+    def fake_analyze(*_args, **_kwargs):
+        calls["count"] += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return [(0.0, 0.5), (1.0, 0.55)]
+
+    monkeypatch.setattr(focus_module, "_analyze_face_centers", fake_analyze)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(focus_module.track_face_centers, source, 0.0, 4.0)
+        assert entered.wait(timeout=2)
+        second = pool.submit(focus_module.track_face_centers, source, 0.0, 4.0)
+        release.set()
+        first_result = first.result(timeout=2)
+        second_result = second.result(timeout=2)
+
+    assert first_result == second_result == [(0.0, 0.5), (1.0, 0.55)]
+    assert calls["count"] == 1
