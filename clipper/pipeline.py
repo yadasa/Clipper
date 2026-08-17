@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -18,12 +17,14 @@ from .metadata import extract_thumbnail, generate_social_metadata
 from .models import ClipCandidate, ProjectManifest, RenderedVariant, Transcript, Word
 from .motion import apply_punch_ins, plan_punch_ins
 from .multicam import build_multicam_master, replace_audio_with_synced_track
-from .render import render_variants
+from .render import align_visual_cues, render_variants
 from .smartcut import KeepInterval, build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
 from .sync import estimate_sync
 from .transcript_io import load_transcript, save_transcript, transcript_from_dict, transcript_to_dict
 from .transcription import transcribe
 from .visuals import resolve_visuals
+
+RENDER_CACHE_SCHEMA = 3
 
 
 def _dump_json(path: Path, value) -> None:
@@ -59,16 +60,6 @@ def _cached_transcribe(path: str | Path, settings: Settings, cache: StageCache) 
 
 def _absolute_words(words: list[Word], candidate: ClipCandidate) -> list[Word]:
     return [w for w in words if w.end > candidate.start and w.start < candidate.end]
-
-
-def _local_words(words: list[Word], candidate: ClipCandidate) -> list[Word]:
-    result = []
-    for word in _absolute_words(words, candidate):
-        start = max(0.0, word.start - candidate.start)
-        end = min(candidate.duration, word.end - candidate.start)
-        if end > start:
-            result.append(Word(word.text, start, end))
-    return result
 
 
 def _candidate_with_current_text(candidate: ClipCandidate, words: list[Word]) -> ClipCandidate:
@@ -178,12 +169,16 @@ def _render_signature(
         cue_payload.append({
             "start": cue.start,
             "end": cue.end,
+            "transcript": cue.transcript,
             "query": cue.query,
             "modes": cue.modes,
+            "asset_type": cue.asset_type,
+            "provider": cue.provider,
             "asset": _asset_fingerprint(cue.asset_path),
         })
     logo_path = str(brand.get("logo_path") or "") if isinstance(brand, dict) else ""
     return stable_hash({
+        "schema": RENDER_CACHE_SCHEMA,
         "source": file_fingerprint(source),
         "candidate": asdict(candidate),
         "ratios": item.get("ratios"),
@@ -259,7 +254,11 @@ def _render_plan(
         if item.get("hook_overlay", True):
             hook_text = str(item.get("hook_text") or "").strip() or generate_hook(local_candidate, settings)
 
-        cues = plan_visual_cues(local_candidate, settings)
+        # Plan on the prepared clip timeline, then snap once more against the
+        # exact words before resolving assets. This makes provider search, the
+        # saved timeline, cache identity, and the encoded insertion agree.
+        cues = plan_visual_cues(local_candidate, settings, words=words)
+        cues = align_visual_cues(cues, words, local_candidate)
         cues = resolve_visuals(cues, root / "visuals" / candidate.id, settings)
         _dump_json(root / "visuals" / candidate.id / "timeline.json", [asdict(c) for c in cues])
 
