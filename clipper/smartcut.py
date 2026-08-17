@@ -93,6 +93,10 @@ def build_keep_intervals(
     The damage budget is hard: if even silence-only cleanup would remove more
     than ``max_removed_ratio`` of the selected clip, cleanup is disabled for that
     clip rather than aggressively collapsing sparse/uncertain transcription.
+
+    Keep intervals are never merged across a removal. Even a very short spoken
+    island must remain its own interval; joining it to a neighbor would span the
+    deleted gap and silently put the dead air/filler back into the edit.
     """
     if candidate.duration <= 0:
         return []
@@ -121,16 +125,7 @@ def build_keep_intervals(
         cursor = max(cursor, end)
     if candidate.end - cursor >= 0.10:
         keep.append(KeepInterval(cursor, candidate.end))
-    if not keep:
-        return full
-
-    compact: list[KeepInterval] = []
-    for interval in keep:
-        if compact and interval.duration < 0.18:
-            compact[-1] = KeepInterval(compact[-1].start, interval.end)
-        else:
-            compact.append(interval)
-    return compact or full
+    return keep or full
 
 
 def compact_duration(intervals: list[KeepInterval]) -> float:
