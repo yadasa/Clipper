@@ -34,11 +34,42 @@ def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
         return default
 
 
+def _float_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    values: list[str] = []
+    for item in raw.split(","):
+        value = item.strip().lower()
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
 
 
 @dataclass(slots=True)
@@ -50,8 +81,23 @@ class Settings:
     max_clips: int = _int_env("MAX_CLIPS", 8)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model: str = _str_env("GEMINI_MODEL", "gemini-2.5-flash")
-    visual_provider: str = _str_env("VISUAL_PROVIDER", "commons").lower()
+
+    # B-roll. VISUAL_PROVIDER remains as a compatibility/coarse switch while
+    # BROLL_PROVIDERS controls the ordered resolver waterfall.
+    visual_provider: str = _str_env("VISUAL_PROVIDER", "auto").lower()
+    broll_providers: tuple[str, ...] = field(default_factory=lambda: _csv_env("BROLL_PROVIDERS"))
+    broll_library_path: str = os.getenv("BROLL_LIBRARY", "").strip()
+    broll_auto_insert: bool = _bool_env("BROLL_AUTO_INSERT", True)
+    broll_max_cues: int = _int_env("BROLL_MAX_CUES", 6, minimum=1)
+    broll_min_relevance: float = _float_env(
+        "BROLL_MIN_RELEVANCE", 0.30, minimum=0.0, maximum=1.0
+    )
+    broll_max_download_mb: int = _int_env("BROLL_MAX_DOWNLOAD_MB", 80, minimum=5)
+    broll_search_cache_hours: int = _int_env("BROLL_SEARCH_CACHE_HOURS", 24, minimum=1)
+    pexels_api_key: str = os.getenv("PEXELS_API_KEY", "").strip()
+    pixabay_api_key: str = os.getenv("PIXABAY_API_KEY", "").strip()
     diffusion_model: str = os.getenv("DIFFUSION_MODEL", "").strip()
+
     brand_kit_path: str = os.getenv("BRAND_KIT", "").strip()
     music_path: str = os.getenv("BACKGROUND_MUSIC", "").strip()
     caption_preset: str = _str_env("CAPTION_PRESET", "karaoke")
