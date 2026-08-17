@@ -6,14 +6,14 @@ Clipper takes a local recording or an authorized social-media source, transcribe
 
 ## What is implemented
 
-- Local file ingest and authorized Instagram/TikTok/YouTube/Facebook/X link ingest through `yt-dlp`.
-- faster-whisper transcription with word timestamps, VAD, cached model loading, CUDA batching when available, and CPU int8 fallback.
+- Local file ingest and authorized Instagram/TikTok/YouTube/Facebook/X link ingest through `yt-dlp`; arbitrary remote URLs are rejected by the automatic social-ingest path.
+- faster-whisper transcription with word timestamps, VAD, cached model loading, reusable CUDA batched pipelines when available, and CPU int8 fallback.
 - A4000-aware local hardware profiling: automatic CUDA Whisper model/batch selection and NVENC preference when available.
 - Multi-dimensional clip scoring for hook, clarity, specificity, payoff, pace, and completeness, plus topic-diversity filtering and optional Gemini reranking.
 - Word-boundary clip snapping so cuts avoid chopping spoken words.
-- Conservative silence tightening and filler-word removal with pause guardrails.
+- Conservative silence tightening and filler-word removal with pause guardrails; automatic deletion is limited to reliable disfluencies rather than context-dependent words.
 - Automatic transcript-driven emphasis punch-ins.
-- Subject-aware reframing: low-resolution sampled MediaPipe face analysis produces a smoothed crop trajectory; FFmpeg performs the full-resolution dynamic crop natively.
+- Subject-aware reframing: low-resolution sampled MediaPipe face analysis produces a smoothed crop trajectory; FFmpeg performs the full-resolution dynamic crop natively. Tracking cache is bounded and source-replacement-aware.
 - 9:16, 4:5, 1:1, and 16:9 delivery variants at social-friendly 1080-class dimensions.
 - Karaoke active-word captions plus clean and minimal caption presets with portrait safe zones.
 - Truthful opening hook/title cards, generated locally or optionally refined with Gemini.
@@ -21,6 +21,7 @@ Clipper takes a local recording or an authorized social-media source, transcribe
 - Optional background music with transcript-aware speech ducking and final loudness normalization.
 - Context-aware B-roll planning tied to spoken phrases and corrected against word timestamps before render.
 - Ordered B-roll resolver with a personal local library, optional Pexels stock video, optional Pixabay stock video, Wikimedia Commons imagery, and optional local Diffusers generation.
+- Provider-specific B-roll relevance scoring that can genuinely reject a weak result, plus exact-asset repeat suppression within each clip.
 - Video and still-image B-roll composition as split-screen, picture-in-picture, or full-screen/interruption edits.
 - B-roll search/download caching, bounded atomic downloads, project-local materialization, provenance metadata, and manual-asset preservation.
 - Separate-microphone and multicamera synchronization using transcript n-gram anchors, robust clock-drift fitting, and waveform cross-correlation fallback.
@@ -28,10 +29,11 @@ Clipper takes a local recording or an authorized social-media source, transcribe
 - H.264/AAC MP4 output, `yuv420p`, loudness normalization, metadata scrubbing, and `+faststart` for web/social delivery.
 - CPU x264 or NVIDIA NVENC output with automatic fallback.
 - Non-destructive `edit_plan.json` files: change trims, enabled clips, ratios, layouts, captions, hooks, brand, and music, then rerender without retranscribing.
-- Stage and render caching with artifact validation and interruption-safe manifest writes.
+- Stage and render caching with source-aware memoization, artifact validation, no-op prepared-stage skipping, and interruption-safe atomic state/intermediate writes.
 - Per-clip social metadata and thumbnails for the library/publishing layer.
-- Local FastAPI processing API and rerender endpoint.
-- Firebase Hosting uploader/library, Firebase Auth, Storage, Firestore queue, desktop worker leases/heartbeats, stale-job recovery, grouped source folders, playback, thumbnails, edit-plan download, and video download.
+- Local FastAPI processing API and rerender endpoint with serialized heavy jobs, bounded atomic upload staging, supported-social URL validation, and finished-output-only media serving.
+- Firebase Hosting uploader/library, Firebase Auth, Storage, Firestore queue, desktop worker leases/heartbeats, transactional stale-job recovery, grouped source folders, playback, thumbnails, edit-plan download, and video download.
+- Firebase worker inbox downloads are atomic and temporary inbox files are cleaned after each job; browser clients cannot overwrite worker-produced project outputs.
 - Optional automatic social publishing through Upload-Post. Publishing is opt-in per queued job and publishing failure does not discard a completed edit.
 - Beige/brown responsive interface with muted accents.
 - GitHub Actions quality, dependency, FFmpeg feature, and optional self-hosted A4000 CUDA/NVENC tests on every push.
@@ -133,7 +135,7 @@ Render signatures prevent unchanged variants from being encoded again.
 python -m clipper.cli process "https://www.instagram.com/reel/..." --own-content --ratio 9:16
 ```
 
-Social-link import requires the ownership/permission acknowledgement. Clipper asks `yt-dlp` for the highest-quality source exposed by the platform. If the platform makes an original/cleaner source available to your logged-in account, configure either `YTDLP_COOKIES_FILE` or `YTDLP_COOKIES_FROM_BROWSER` so the home machine can access it.
+Social-link import requires the ownership/permission acknowledgement and is limited to supported Instagram, TikTok, YouTube, Facebook, and X hosts. Clipper asks `yt-dlp` for the highest-quality source exposed by the platform. If the platform makes an original/cleaner source available to your logged-in account, configure either `YTDLP_COOKIES_FILE` or `YTDLP_COOKIES_FROM_BROWSER` so the home machine can access it.
 
 Clipper does not erase a baked-in watermark from another creator's media. The intended flow is to recover the clean source of media you own.
 
@@ -156,9 +158,9 @@ Unavailable providers are skipped, so the default configuration works without ev
 The pipeline works in two stages:
 
 1. visual planning identifies concrete spoken ideas and assigns cue windows;
-2. immediately before FFmpeg composition, Clipper matches the cue transcript back to word timestamps and snaps the insert to the phrase it actually illustrates.
+2. before provider resolution/render fan-out, Clipper matches the cue transcript back to word timestamps and snaps the insert to the phrase it actually illustrates.
 
-This prevents relevant B-roll from appearing several seconds early or late.
+The aligned cue is then reused across aspect ratios/layouts instead of running fuzzy transcript matching separately for every output. This prevents relevant B-roll from appearing several seconds early or late and avoids duplicate timing work.
 
 ### Personal B-roll library
 
@@ -181,9 +183,9 @@ Point `BROLL_LIBRARY` to reusable media you own. Clipper searches filename/folde
 - **Wikimedia Commons:** no-key still-image fallback with attribution metadata.
 - **Diffusers:** optional local generated-image fallback when `DIFFUSION_MODEL` is configured.
 
-Remote search payloads and downloaded stock assets are cached. Selected assets are hard-linked or copied into the project for reproducibility. Downloads are size-bounded and atomically finalized. Short video B-roll is stream-looped only for the cue window, and B-roll audio is never mapped into the final creator audio.
+Remote search payloads and downloaded stock assets are cached. Selected assets are hard-linked or copied into the project for reproducibility. Downloads are size-bounded and atomically finalized. Short video B-roll is stream-looped only for the cue window, and B-roll audio is never mapped into the final creator audio. The configured relevance threshold can reject weak results, and the same exact asset is not automatically reused for a later cue in the same clip.
 
-See `BROLL_ARCHITECTURE.md` for provider contracts, caching, provenance, and extension rules.
+See `BROLL_ARCHITECTURE.md` for provider contracts, caching, relevance, repeat avoidance, provenance, and extension rules.
 
 Gemini remains optional. Without it, deterministic local heuristics select clips, hooks/metadata, and spoken-phrase B-roll cues. With `GEMINI_API_KEY`, Gemini can rerank candidates and refine hook, metadata, and B-roll planning.
 
@@ -199,23 +201,28 @@ FFMPEG_ENCODER=
 RENDER_WORKERS=
 ```
 
-Set them only when overriding auto-tuning. Subject tracking, transcription, prepared edit stages, B-roll searches/assets, local image models, and final render signatures use caching to avoid repeating unchanged work.
+Set them only when overriding auto-tuning. Subject tracking, transcription, prepared edit stages, B-roll searches/assets, local image models, media probes/fingerprints, and final render signatures use caching to avoid repeating unchanged work. Prepared video intermediates are skipped entirely when the smart-cut/punch-in plan contains no actual transformation.
 
 ## Local API
 
+Start the development API on loopback by default:
+
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 5175
+uvicorn api:app --host 127.0.0.1 --port 5175
 ```
 
 Endpoints:
 
-- `GET /api/health` — includes the detected hardware profile.
+- `GET /api/health` — includes the detected hardware profile and configured local upload limit.
 - `GET /api/projects`
 - `GET /api/jobs/{job_id}`
+- `GET /media/{project_id}/clips/...` — serves only finished clip media, not source recordings/transcripts/internal worker data.
 - `POST /api/process` — accepts primary media, extra cameras, separate mic, music, logo, brand fields, and edit-intelligence controls.
 - `POST /api/projects/{project_id}/rerender` — rerenders the existing editable plan without retranscription.
 
-Do not expose the development API directly to an untrusted network; LAN/API authentication hardening is tracked in the implementation checklist.
+Local uploads are staged in chunks, bounded by `LOCAL_MAX_UPLOAD_MB` (8 GB by default), and atomically finalized. Heavy process/rerender jobs are serialized by default so concurrent requests do not make multiple GPU/FFmpeg pipelines fight for the same workstation resources.
+
+Keep the API on loopback unless you deliberately add authentication before exposing it on a LAN or other network. LAN authentication remains tracked in `NEXT_IMPLEMENTATION_CHECKLIST.md`.
 
 ## Firebase mobile -> home desktop flow
 
@@ -245,7 +252,7 @@ python -m clipper.worker
 
 From the hosted site you can upload a video from a phone, attach extra camera/mic files, add a logo/music bed, choose edit intelligence and caption style, or paste an authorized social link. Firestore receives the job, the home worker claims it transactionally, keeps a lease alive while editing, uploads completed files/thumbnails/edit plan back to Storage, and writes a grouped project record for the browser library.
 
-The worker validates that Storage source paths belong to the requesting user's exact job folder before the Admin SDK reads them.
+The worker validates that Storage source paths belong to the requesting user's exact job folder before the Admin SDK reads them. Lease-expiry recovery re-checks state inside a transaction so a heartbeat cannot race a stale-job requeue. Downloads are staged atomically, per-job inbox data is removed after processing, and worker-produced project Storage paths are read-only to browser clients under `storage.rules`.
 
 ## Automatic publishing
 
@@ -297,7 +304,7 @@ The Firebase library mirrors the same concept: one project per starting source, 
 
 `.github/workflows/ci.yml` runs on every push, every pull request, and manual dispatch. It has three layers:
 
-1. **Fast quality gate** — Python compilation, fatal Ruff scan, unit/regression tests, browser JavaScript parse, and Firebase JSON validation.
+1. **Fast quality gate** — Python compilation, Ruff correctness scan, unit/regression tests, browser JavaScript parse, and Firebase JSON validation.
 2. **Runtime + FFmpeg feature smoke** — installs the real runtime dependency set and FFmpeg, imports the full application/API, verifies required FFmpeg filters, then executes synthetic smart-cut, silent-video, punch-in, video-B-roll, karaoke-caption, hook, brand/logo, music-ducking, and 9:16 render paths.
 3. **Optional A4000 GPU smoke** — verifies CUDA, the A4000 identity, `h264_nvenc`, a real NVENC encode, and ffprobe result on your own desktop runner.
 
