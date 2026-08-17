@@ -1,340 +1,350 @@
-# Clipper — next implementation checklist
+# Clipper — Next Implementation Checklist
 
-This is the working checklist for the next Clipper session. It separates **what was hardened now** from **what still needs to be implemented or activated on the real workstation** so unfinished infrastructure is never mistaken for finished software.
+This file is the canonical engineering backlog for the next Clipper sessions. Completed items reflect code that is already in the repository; unchecked items require workstation activation, real-media validation, or additional product work.
 
-## Completed in the latest hardening pass
+## Current hardening baseline
 
-- [x] Add regression tests that intentionally break cache, smart-cut, clip-selection, edit-plan, visual, and render-cache assumptions before accepting fixes.
-- [x] Fix smart-cut cleanup so a tiny retained speech island can no longer cause deleted silence/filler gaps to be silently reintroduced.
-- [x] Make media fingerprints stable across identical copies with different filesystem mtimes, improving cache reuse across Firebase/local project copies.
-- [x] Sample the beginning, middle, and end of large media for cache fingerprints so same-size files with changed middle content do not collide as easily.
-- [x] Rebuild clip scoring text from timestamped words after final trim/snap so scoring, hooks, Gemini reranking, and B-roll planning do not use words outside the actual clip.
-- [x] Contain edit-plan logo/music assets inside the project instead of allowing `../` relative paths to escape the project root.
-- [x] Cache Wikimedia Commons visuals locally by semantic query/result index so rerenders stop redownloading or silently swapping unchanged B-roll.
-- [x] Cache local Diffusers images by model + prompt + generation settings so unchanged rerenders do not waste GPU work.
-- [x] Include actual logo/music/B-roll asset fingerprints in the final render signature so changing an asset in place invalidates the correct cached render.
-- [x] Reject obviously tiny/truncated cached video variants instead of treating any existing file as a valid finished render.
-- [x] Keep the fast CI lane capable of importing/testing visual code by including `httpx` in its lightweight validation dependencies.
+- [x] Regression coverage for cache invalidation, smart cuts, clip selection, project assets, visual reuse, and damaged render outputs.
+- [x] Smart-cut intervals never bridge across a region explicitly selected for removal.
+- [x] Media fingerprints are copy-stable and sample the beginning, middle, and end of large files.
+- [x] Clip scoring, hooks, metadata, and visual planning use only transcript words inside the selected clip.
+- [x] Rerender logo/music assets are contained inside the project instead of escaping through relative paths.
+- [x] Commons and Diffusers still-image assets are cached across unchanged rerenders.
+- [x] Render signatures include source, B-roll, logo, music, trim, layout, caption, and hook dependencies.
+- [x] Tiny/truncated cached render files are rejected.
+- [x] Context-aware B-roll provider architecture is isolated in `clipper/broll.py` and documented in `BROLL_ARCHITECTURE.md`.
+- [x] Automatic B-roll timing is planned from spoken phrases and corrected against word timestamps before rendering.
+- [x] Both still-image and video B-roll can be composed as split-screen, PIP, or full-screen interruption.
+- [x] Remote B-roll search responses/downloads are cached and selected assets are materialized inside the project.
+- [x] Provider failures degrade to the next configured source rather than failing the whole edit.
 
 ---
 
-# When I get back — first activation pass
+# When I get back — workstation activation first
 
-Do these before adding more product surface area. The goal is to prove one real phone -> Firebase -> A4000 desktop -> Firebase -> playback/download round trip.
+The first goal is one proven phone -> Firebase -> A4000 desktop -> Firebase -> browser playback/download loop.
 
 ## A. NVIDIA A4000 workstation
 
-- [ ] Update/install a stable NVIDIA production or Studio driver and confirm `nvidia-smi` sees the A4000 with the expected VRAM.
-- [ ] Install/verify an FFmpeg build that exposes `h264_nvenc` (and preferably `hevc_nvenc` for future archival/proxy work).
+- [ ] Install/update a stable NVIDIA production or Studio driver and confirm `nvidia-smi` sees the A4000 and expected VRAM.
+- [ ] Install/verify FFmpeg and FFprobe on `PATH`.
+- [ ] Confirm FFmpeg exposes `h264_nvenc`; verify `hevc_nvenc` as an optional archival/proxy path.
 - [ ] Create the Python 3.11 virtual environment and install `requirements.txt`.
-- [ ] Install the CUDA/cuDNN runtime versions required by the pinned `faster-whisper`/CTranslate2 stack.
-- [ ] Run `python scripts/gpu_smoke.py` locally and require both CTranslate2 CUDA inference and NVENC encode to pass.
-- [ ] Run one real 5-15 minute talking-head source through `large-v3`, starting with batch size 8 and `RENDER_WORKERS=2`.
-- [ ] Watch VRAM, GPU utilization, thermals, encode utilization, wall time, and output quality; tune batch/render concurrency only after measuring.
+- [ ] Install the CUDA/cuDNN runtime expected by the pinned faster-whisper/CTranslate2 stack.
+- [ ] Run `python scripts/gpu_smoke.py` and require both CTranslate2 CUDA inference and NVENC encode to pass.
+- [ ] Run a representative 5-15 minute talking-head recording through `large-v3` with batch 8 and `RENDER_WORKERS=2`.
+- [ ] Measure VRAM, GPU utilization, encode utilization, temperature, wall time, and output size before tuning concurrency.
 
-### Acceptance gate
+### A4000 acceptance gate
 
-- [ ] Whisper runs on CUDA rather than silently falling back to CPU.
-- [ ] Final H.264 delivery encodes through NVENC when `FFMPEG_ENCODER=nvenc`.
-- [ ] A 10-minute representative source completes without OOM, corrupt output, runaway thermals, or audio/video drift.
+- [ ] Whisper is confirmed on CUDA rather than silent CPU fallback.
+- [ ] Final H.264 delivery is confirmed on NVENC when requested.
+- [ ] A representative 10-minute source completes without OOM, corruption, runaway thermals, or A/V drift.
 
-## B. GitHub self-hosted A4000 Actions lane
+## B. GitHub self-hosted A4000 lane
 
-- [ ] Register the home Windows PC as a GitHub self-hosted runner for `yadasa/Clipper`.
-- [ ] Apply runner labels exactly matching the workflow: `self-hosted`, `Windows`, `X64`, `a4000`.
-- [ ] Set the repository Actions variable `A4000_RUNNER_ENABLED=true`.
-- [ ] Keep the runner restricted to trusted `main` pushes/manual dispatches; do not enable untrusted PR code on the home PC.
-- [ ] Trigger a manual workflow and verify `NVIDIA A4000 CTranslate2 CUDA + NVENC smoke` runs instead of being skipped.
-- [ ] Configure the runner/service to recover after reboot and verify it returns online automatically.
+- [ ] Register the home Windows PC as a self-hosted runner for `yadasa/Clipper`.
+- [ ] Apply runner labels `self-hosted`, `Windows`, `X64`, `a4000`.
+- [ ] Set repository Actions variable `A4000_RUNNER_ENABLED=true`.
+- [ ] Keep the runner restricted to trusted `main` pushes/manual dispatch; never execute arbitrary PR code on the home PC.
+- [ ] Trigger the workflow manually and verify the A4000 CUDA/NVENC smoke runs instead of being skipped.
+- [ ] Configure runner recovery after reboot and verify it returns online unattended.
 
 ## C. Firebase production activation
 
 - [ ] Create/select the production Firebase project.
-- [ ] Enable Google Authentication and add the real Hosting domains as authorized domains.
+- [ ] Enable Google Authentication and authorize the real Hosting domains.
 - [ ] Create Firestore and Cloud Storage in the intended region.
 - [ ] Deploy `firestore.rules`, `storage.rules`, and Firebase Hosting from this repository.
 - [ ] Configure `FIREBASE_PROJECT_ID` and `FIREBASE_STORAGE_BUCKET` on the home desktop.
-- [ ] Configure Application Default Credentials or a narrowly stored Firebase Admin service-account credential on the home desktop; never commit it.
-- [ ] Start `python -m clipper.worker` and confirm the website reports the home desktop online.
-- [ ] From the phone, upload one real source and confirm the desktop claims the job, processes it, uploads variants, and returns to idle.
-- [ ] Verify another signed-in user cannot read the first user's projects or source objects.
-- [ ] Test an interrupted worker/job and confirm the lease recovery path requeues it rather than losing the project.
+- [ ] Configure ADC or a narrowly stored Firebase Admin service-account credential; never commit it.
+- [ ] Start `python -m clipper.worker` and confirm the site reports the desktop online.
+- [ ] Upload a real source from the phone and verify claim -> process -> upload outputs -> idle.
+- [ ] Test with a second account and verify cross-user Firestore/Storage isolation.
+- [ ] Kill the worker during a job and verify lease expiry/requeue recovers rather than losing the project.
 
-## D. Optional external services
+## D. Optional external integrations
 
-- [ ] Configure owner-authenticated yt-dlp cookies only if Instagram/TikTok clean-source retrieval needs them.
-- [ ] Add `GEMINI_API_KEY` only if AI reranking/hooks/visual planning are desired; prove the local fallback remains usable with the key removed.
-- [ ] Install `requirements-ai.txt` and choose a Diffusers model only if local generated B-roll is desired.
-- [ ] Configure Upload-Post credentials and connect only the social accounts you actually want Clipper to publish to.
-- [ ] Publish to private/test destinations first and verify idempotency prevents accidental duplicate posts.
+- [ ] Configure owner-authenticated yt-dlp cookies only if Instagram/TikTok source recovery needs them.
+- [ ] Add `GEMINI_API_KEY` only if AI reranking/hooks/B-roll planning are desired; confirm local fallback still works without it.
+- [ ] Install `requirements-ai.txt` and choose a Diffusers model only if local generated imagery is desired.
+- [ ] Add Pexels/Pixabay API keys only for stock-video search sources you want enabled.
+- [ ] Configure Upload-Post only after edit/export reliability is proven.
+- [ ] Publish to private/test destinations first and verify idempotency before enabling production accounts.
 
 ---
 
-# Must-add product features
+# P0 — product features to build next
 
-## P0 — build these next
+## 1. Interactive timeline + visual edit-plan editor
 
-### 1. Interactive timeline + visual edit-plan editor
-
-**Why:** `edit_plan.json` already makes edits non-destructive, but a creator should not have to edit JSON to use it.
-
-- [ ] Build a browser timeline with source waveform, transcript, clip in/out handles, B-roll regions, punch-in markers, caption regions, and music track.
-- [ ] Drag clip boundaries while snapping to word/sentence edges.
-- [ ] Enable/disable clips and aspect-ratio variants without deleting their history.
+- [ ] Browser timeline with waveform, transcript, clip handles, B-roll regions, punch-in markers, caption regions, and music track.
+- [ ] Drag in/out points with word/sentence snapping.
+- [ ] Enable/disable clips and aspect-ratio variants without deleting history.
 - [ ] Edit hook text, caption preset, B-roll layout, logo, music level, and punch-ins per clip.
-- [ ] Add `Preview` and `Final render` actions that modify the plan and call rerender without retranscription.
-- [ ] Autosave plan revisions and show unsaved/rendering/error states clearly.
+- [ ] `Preview` and `Final render` actions that rerender without retranscription.
+- [ ] Autosave plan revisions with explicit saved/rendering/error state.
 
-**Acceptance:** A phone/desktop browser user can change a clip, preview it, and produce a new final render without touching JSON or retranscribing.
+**Acceptance:** a phone or desktop browser can alter a clip and rerender it without editing JSON or rerunning transcription.
 
-### 2. Transcript correction + timing repair
+## 2. Transcript correction + timing repair
 
-**Why:** Caption quality and every transcript-aware edit depend on accurate words/timestamps.
-
-- [ ] Make transcript text editable in the project UI.
-- [ ] Preserve word timing for untouched text and realign only the modified sentence/region.
-- [ ] Add find/replace for names, brands, jargon, and recurring transcription mistakes.
-- [ ] Add dictionary/custom-vocabulary hints per brand/project.
-- [ ] Mark low-confidence words for review when confidence metadata is available.
+- [ ] Edit transcript text in the project UI.
+- [ ] Preserve timing for untouched text and realign only the modified sentence/region.
+- [ ] Find/replace for names, products, jargon, and recurring transcription mistakes.
+- [ ] Project/brand vocabulary hints.
+- [ ] Surface low-confidence words where confidence metadata is available.
 - [ ] Export corrected SRT, VTT, ASS, and plain transcript files.
 
-**Acceptance:** Correcting one name does not require a full retranscription and every caption/export uses the corrected text.
+**Acceptance:** correcting one word does not require a full retranscription and all captions/exports use the correction.
 
-### 3. Proxy/preview render mode
+## 3. Proxy/preview rendering
 
-**Why:** Full 1080x1920 renders are wasteful while choosing trims, B-roll, captions, or hooks.
+- [ ] Generate reusable 540p/720p proxies for every source/camera.
+- [ ] Use proxies for trim, caption, hook, B-roll, and layout previews.
+- [ ] Cache previews independently from delivery renders.
+- [ ] Mark preview state in the UI; never burn a draft marker into final delivery.
+- [ ] Always return to the original/full-resolution source for final render.
 
-- [ ] Generate reusable 540p/720p proxies once per source/camera.
-- [ ] Use low-resolution fast previews for edit iterations.
-- [ ] Cache preview renders separately from final-delivery renders.
-- [ ] Provide a clear `Draft` watermark/status in the UI, not in final output.
-- [ ] Final render must return to full source resolution and delivery settings.
+**Acceptance:** common edit iterations preview in seconds without reducing final quality.
 
-**Acceptance:** Common edit changes preview in seconds on the A4000 without reducing final quality.
+## 4. Context-aware B-roll engine + motion treatment
 
-### 4. Video B-roll + motion treatment for stills
+### Automatic semantic placement
 
-**Why:** Static Commons images are useful fallback material but are not enough for polished short-form edits.
+- [x] Derive candidate visual moments from the exact words/phrases being spoken.
+- [x] Avoid carpeting the entire clip with B-roll; cap cue density by clip length.
+- [x] Snap the selected cue back to word timestamps immediately before FFmpeg render.
+- [x] Automatically insert the resolved media over the phrase it illustrates.
+- [x] Keep visual cues non-overlapping by default.
+- [x] Preserve a `none` outcome when no configured provider returns an acceptable visual.
 
-- [ ] Add reusable/licensed video B-roll providers with source/license metadata.
-- [ ] Allow local B-roll upload and a personal reusable asset library.
-- [ ] Add Ken Burns/pan/zoom/parallax treatment for still images.
-- [ ] Add entrance/exit transitions with conservative defaults.
-- [ ] Score semantic relevance before accepting a B-roll result.
-- [ ] Allow `none` when a cutaway would be worse than the talking head.
-- [ ] Cache fetched/generated assets globally by content identity where licensing allows.
+### Multiple B-roll loading paths
 
-**Acceptance:** B-roll can be replaced or disabled per cue, remains attribution-aware, and unchanged rerenders make no unnecessary network/model calls.
+- [x] **Personal local library** — search reusable owned media by filename, folder context, and optional JSON tags/title/description.
+- [x] **Pexels stock video** — optional API-key source with cached search and practical-resolution video selection.
+- [x] **Pixabay stock video** — optional API-key source with cached safe-search results and video selection.
+- [x] **Wikimedia Commons** — no-key reusable still-image fallback with attribution metadata.
+- [x] **Local Diffusers** — optional locally generated image fallback when a configured model is available.
+- [ ] **Manual upload per cue** from desktop/mobile.
+- [ ] **Project asset bin** for media uploaded once and reused across clips in the same project.
+- [ ] **Personal library UI** to tag, favorite, search, and blacklist reusable assets.
+- [ ] **Direct licensed media URL** ingestion with explicit provenance/license fields.
 
-### 5. Speaker diarization + active-speaker framing
+### Resolver behavior and provenance
 
-**Why:** Multicam interviews need to know *who* is talking, not merely when speech occurs.
+- [x] Deterministic provider waterfall configurable with `BROLL_PROVIDERS`.
+- [x] Skip providers that are not configured instead of throwing setup errors.
+- [x] Never overwrite a manual cue asset with an automatic result.
+- [x] Keep provider, source URL, attribution, asset type, and relevance score on each cue.
+- [x] Cache remote searches and stock downloads outside individual projects.
+- [x] Hard-link/copy the selected asset into the project so the edit remains reproducible.
+- [x] Bound remote download size and use atomic partial-file writes.
+- [x] Ignore B-roll audio; creator speech/music remains authoritative.
+- [x] Loop short video B-roll only for the required cue window.
+- [ ] Add embedding-based semantic reranking after provider search.
+- [ ] Add visual quality scoring for blur, watermarks, severe compression, bad aspect, and unsafe/irrelevant content.
+- [ ] Add perceptual duplicate detection so neighboring cues do not reuse near-identical shots.
+- [ ] Add provider/license credit UI and downloadable attribution report.
 
-- [ ] Add speaker diarization with stable speaker IDs across a source.
-- [ ] Let the user label `Speaker 1`/`Speaker 2` with names.
-- [ ] Associate face tracks/cameras with speakers where confidence is sufficient.
-- [ ] Drive multicam switching, crop target, split-screen choice, and captions from active speaker.
-- [ ] Keep a conservative fallback when identity/face association is uncertain.
-- [ ] Prevent rapid ping-pong cuts with minimum shot duration/hysteresis.
+### Motion and editor controls
 
-**Acceptance:** A two-person interview follows the active speaker while preserving reaction shots and never cuts wildly on brief interjections.
+- [ ] Deterministic Ken Burns pan/zoom for stills.
+- [ ] Optional subtle parallax treatment where source geometry supports it.
+- [ ] Conservative entrance/exit transitions.
+- [ ] Replace/disable/reorder a cue directly on the timeline.
+- [ ] Lock a selected B-roll asset so later rerenders cannot auto-replace it.
+- [ ] Per-cue override for split, PIP, interruption, or no insert.
+- [ ] B-roll A/B preview without rebuilding unrelated stages.
 
-### 6. Advanced speech cleanup + mastering chain
+**Acceptance:** the user can speak about multiple concrete topics in one clip and Clipper automatically chooses contextually related media from multiple sources, places each item over the matching spoken phrase, preserves provenance, avoids unnecessary repeat downloads, and allows every automatic choice to be overridden.
 
-**Why:** Viewers forgive average video faster than muddy, noisy, harsh, or inconsistent speech.
+## 5. Speaker diarization + active-speaker framing
 
-- [ ] Add optional noise reduction before loudness normalization.
-- [ ] Add high-pass/EQ, gentle compression, de-essing, limiter/true-peak protection, and optional de-reverb.
-- [ ] Analyze clipping, noise floor, loudness, and speech intelligibility before choosing processing strength.
-- [ ] Keep original audio untouched and make processing reversible in the edit plan.
-- [ ] Define platform delivery presets around LUFS/true peak rather than one universal hard-coded chain.
-- [ ] Add A/B audio preview.
+- [ ] Stable speaker IDs across a source.
+- [ ] User labels for speaker names.
+- [ ] Associate speakers with face tracks/cameras when confidence is sufficient.
+- [ ] Drive camera choice, crop target, split screen, and captions from active speaker.
+- [ ] Conservative fallback when identity is uncertain.
+- [ ] Minimum shot duration/hysteresis to prevent ping-pong cuts.
 
-**Acceptance:** Speech becomes clearer without pumping, musical artifacts, audible gating, or double-normalization.
+**Acceptance:** a two-person interview follows the active speaker without frantic cuts on brief interjections.
 
-### 7. Platform safe-zone compositor + preview overlays
+## 6. Advanced speech cleanup + mastering
 
-**Why:** TikTok/Reels/Shorts UI can cover captions, hooks, logos, and faces even when the raw 9:16 frame looks correct.
+- [ ] Optional denoise before loudness normalization.
+- [ ] High-pass/EQ, gentle compression, de-essing, limiter/true-peak protection, optional de-reverb.
+- [ ] Measure clipping, noise floor, loudness, and speech intelligibility before choosing processing strength.
+- [ ] Keep original audio untouched and make processing reversible.
+- [ ] Platform delivery presets around LUFS/true peak.
+- [ ] A/B audio preview.
 
-- [ ] Maintain safe-zone templates for TikTok, Instagram Reels, YouTube Shorts, and other enabled targets.
-- [ ] Show simulated platform UI overlays in preview only.
-- [ ] Move captions/hooks/logos independently per platform when required.
-- [ ] Warn when tracked faces or important B-roll fall under known UI regions.
-- [ ] Save platform-specific layout overrides in the edit plan.
+## 7. Platform safe-zone compositor
 
-**Acceptance:** A creator can visually verify every target before export and captions never default under common platform controls.
+- [ ] Safe-zone templates for TikTok, Reels, Shorts, and other enabled targets.
+- [ ] Simulated platform UI overlays in preview only.
+- [ ] Platform-specific caption/hook/logo positions.
+- [ ] Warnings when faces or important B-roll fall under known UI areas.
+- [ ] Save target-specific layout overrides in the edit plan.
 
-### 8. Publishing scheduler + durable retry dashboard
+## 8. Publishing scheduler + durable retry dashboard
 
-**Why:** Publishing hooks exist, but production use needs scheduling, observability, token health, and safe recovery.
+- [ ] Per-platform scheduled times/time zones.
+- [ ] Durable publish state machine independent from render completion.
+- [ ] Retry/backoff only for retryable failures.
+- [ ] Token/account health warnings.
+- [ ] Idempotency across worker restarts.
+- [ ] Retry one platform without reposting successful targets.
+- [ ] Save external post IDs/URLs returned by the provider.
 
-- [ ] Add per-platform scheduled publish times/time zones.
-- [ ] Store a durable publish state machine separate from render completion.
-- [ ] Add exponential retry/backoff only for retryable failures.
-- [ ] Surface account/token expiration before a scheduled post fails.
-- [ ] Preserve idempotency across worker restarts and manual retries.
-- [ ] Allow retrying one failed platform without reposting successful targets.
-- [ ] Log external post IDs/URLs where the provider returns them.
+## 9. Analytics feedback loop for personalized ranking
 
-**Acceptance:** Killing/restarting the worker during a publish cannot create a duplicate post.
-
-### 9. Analytics feedback loop for personalized clip ranking
-
-**Why:** Generic `viral` scoring should eventually learn what *this creator's* audience actually watches, saves, and shares.
-
-- [ ] Import available post metrics: views, average watch time, completion, rewatches, likes, comments, saves, shares, follows/conversions.
-- [ ] Store the exact edit-plan/render signature associated with each published variant.
-- [ ] Compare performance by hook type, clip score dimensions, duration, caption style, B-roll density, layout, topic, and platform.
+- [ ] Import available views, watch time, completion, rewatches, likes, comments, saves, shares, follows/conversions.
+- [ ] Store the exact edit-plan/render signature for every published variant.
+- [ ] Compare results by hook, score dimensions, duration, captions, B-roll density, layout, topic, and platform.
 - [ ] Learn creator-specific ranking weights only after enough data exists.
-- [ ] Keep historical baseline/generic scoring available and visible.
-- [ ] Never train against vanity views alone when retention/engagement is available.
+- [ ] Keep generic baseline scoring visible.
+- [ ] Prefer retention/engagement over vanity views when available.
 
-**Acceptance:** The ranking report can explain why a candidate moved up/down based on the creator's own measured history.
+## 10. Revision history + compare/rollback
 
-### 10. Revision history + compare/rollback
+- [ ] Immutable edit-plan revisions with parent IDs.
+- [ ] Record who/what changed trims, captions, B-roll, hook, music, and layouts.
+- [ ] Associate outputs with exact revision/signature.
+- [ ] Side-by-side revision compare.
+- [ ] Restore an old revision without deleting newer work.
+- [ ] Never garbage-collect a revision referenced by a published post.
 
-**Why:** Non-destructive editing needs safe experimentation rather than one mutable plan file.
+## 11. Shot-quality-aware multicam director
 
-- [ ] Version edit plans immutably with parent revision IDs.
-- [ ] Record who/what changed trims, captions, B-roll, hook, music, or layouts.
-- [ ] Keep render outputs associated with the exact revision/signature.
-- [ ] Add side-by-side revision comparison.
-- [ ] Restore an older revision without deleting newer work.
-- [ ] Add storage cleanup rules that never delete a revision still referenced by a published post.
+- [ ] Score blur/focus, exposure, face visibility, occlusion, shake, framing, and continuity.
+- [ ] Prefer active speaker only when that camera passes a quality floor.
+- [ ] Use reactions/wides intentionally at idea boundaries.
+- [ ] Penalize excessive/discontinuous cuts.
+- [ ] Expose automatic director decisions for manual override.
 
-**Acceptance:** Any rendered/published clip can be reproduced from its saved revision.
+## 12. Thumbnail/title studio
 
-### 11. Shot-quality-aware multicam director
-
-**Why:** A synced camera should not be selected merely because it exists.
-
-- [ ] Score blur/focus, exposure, face visibility, occlusion, shake, framing, and shot continuity.
-- [ ] Prefer the active speaker only when that camera meets a quality floor.
-- [ ] Use reaction/wide shots intentionally at sentence/idea boundaries.
-- [ ] Penalize cuts that are too frequent or visually discontinuous.
-- [ ] Expose the automatic director decisions on the timeline for manual override.
-
-**Acceptance:** Covering a camera or knocking it out of focus causes the director to avoid it automatically.
-
-### 12. Thumbnail/title studio with variants
-
-**Why:** The current representative frame is useful, but publishing performance often depends on deliberate packaging.
-
-- [ ] Rank candidate thumbnail frames by face visibility, expression, sharpness, and composition.
-- [ ] Allow frame scrubbing/manual selection.
-- [ ] Add optional text treatment using the brand kit.
-- [ ] Generate multiple truthful title/hook pairs from the actual clip transcript.
-- [ ] Save platform-specific thumbnail variants where supported.
-- [ ] Track which thumbnail/title variant was published for analytics.
-
-**Acceptance:** The project library can produce, compare, and remember multiple packaging variants without rerendering video.
+- [ ] Rank frames by face visibility, expression, sharpness, and composition.
+- [ ] Manual frame scrub/selection.
+- [ ] Optional brand text treatment.
+- [ ] Multiple truthful title/hook variants derived from the clip transcript.
+- [ ] Platform-specific thumbnail variants where supported.
+- [ ] Track the exact packaging variant published.
 
 ---
 
-# P1 — production/workflow features after P0
+# P1 — production/workflow features
 
-### 13. Translation + localization
+## 13. Translation + localization
 
-- [ ] Translate corrected transcripts/captions while preserving source meaning.
-- [ ] Support bilingual subtitle modes.
-- [ ] Add locale-safe fonts and line-breaking rules.
-- [ ] Optionally create dubbed tracks only with explicit creator approval and clear language labels.
-- [ ] Export localized caption sidecars as well as burned-in variants.
+- [ ] Translate corrected transcripts while preserving meaning.
+- [ ] Bilingual subtitle modes.
+- [ ] Locale-safe fonts and line breaking.
+- [ ] Optional explicitly approved dubbed tracks.
+- [ ] Localized caption sidecars and burned-in variants.
 
-### 14. Batch ingest + watch folders
+## 14. Batch ingest + watch folders
 
-- [ ] Queue multiple files/projects from the web UI.
-- [ ] Add local watch-folder profiles for camera-card/drop-folder workflows.
-- [ ] Deduplicate identical source files by content identity.
-- [ ] Add queue priority, pause/resume/cancel, and overnight mode.
-- [ ] Prevent one failed project from blocking later jobs.
+- [ ] Queue multiple files/projects from the UI.
+- [ ] Local watch-folder profiles.
+- [ ] Content-based source deduplication.
+- [ ] Queue priority, pause/resume/cancel, overnight mode.
+- [ ] One failed project cannot block later jobs.
 
-### 15. Windows tray/service worker
+## 15. Windows tray/service worker
 
-- [ ] Package the worker as an auto-starting Windows service/tray app.
-- [ ] Show GPU, queue, active job, disk usage, last error, and Firebase connection state.
-- [ ] Add graceful shutdown so active manifests/cache metadata are left consistent.
-- [ ] Support safe application updates with rollback.
-- [ ] Keep GitHub Actions runner lifecycle separate from the editing worker lifecycle.
+- [ ] Auto-starting Windows service/tray app.
+- [ ] GPU, queue, active job, disk use, last error, Firebase state.
+- [ ] Graceful shutdown with consistent manifests/cache.
+- [ ] Safe update + rollback.
+- [ ] Keep the Actions runner lifecycle separate from the editing worker.
 
-### 16. Storage lifecycle, deduplication, and quota controls
+## 16. Storage lifecycle + deduplication
 
-- [ ] Add a content-addressable cache for reusable source/proxy/B-roll artifacts.
-- [ ] Define retention windows for temporary Firebase inbox files, proxies, prepared intermediates, and old renders.
-- [ ] Never delete original source or published revision artifacts without an explicit policy.
-- [ ] Show local disk and Firebase Storage usage.
-- [ ] Add a dry-run cleanup report before destructive cleanup.
+- [ ] Content-addressable cache for source/proxy/B-roll artifacts.
+- [ ] Retention policies for Firebase inbox, proxies, prepared intermediates, old renders.
+- [ ] Never delete originals/published revision artifacts without explicit policy.
+- [ ] Local/Firebase storage usage dashboard.
+- [ ] Dry-run cleanup report before destructive cleanup.
 
-### 17. End-to-end quality/performance benchmark suite
+## 17. End-to-end benchmark suite
 
-- [ ] Create a small legally redistributable fixture set: talking head, silence/fillers, noisy audio, two speakers, multicam drift, portrait/landscape, no-audio video.
-- [ ] Record CPU/GPU wall time, VRAM peak, output size, decode/encode failures, transcript WER sample, sync error, crop stability, and render validity.
-- [ ] Store baseline metrics and fail CI on major regressions where deterministic.
-- [ ] Add a local A4000 benchmark command that does not run on every push.
-- [ ] Produce a machine-readable benchmark JSON plus a human report.
+- [ ] Legally redistributable fixture set: talking head, fillers/silence, noisy audio, two speakers, multicam drift, portrait/landscape, silent video.
+- [ ] Measure CPU/GPU time, VRAM, output size, WER sample, sync error, crop stability, failures, and render validity.
+- [ ] Store deterministic baselines and gate meaningful regressions.
+- [ ] Local A4000 benchmark command separate from every-push CI.
+- [ ] Machine-readable JSON plus human report.
 
-### 18. Windows installer + first-run diagnostics
+## 18. Windows installer + first-run diagnostics
 
-- [ ] Build a one-command/installer setup for Python/runtime dependencies.
-- [ ] Detect missing FFmpeg, NVENC, CUDA/CTranslate2, Firebase credentials, writable workdir, and network connectivity.
-- [ ] Offer a guided first-run checklist instead of cryptic exceptions.
-- [ ] Include a diagnostics bundle generator that excludes credentials and private media.
+- [ ] One-command/installer setup.
+- [ ] Detect missing FFmpeg, NVENC, CUDA/CTranslate2, Firebase credentials, workdir permissions, network.
+- [ ] Guided first-run diagnostics instead of raw exceptions.
+- [ ] Credential/private-media-safe diagnostics bundle.
 
-### 19. LAN/API security hardening
+## 19. LAN/API security hardening
 
-- [ ] Require authentication if the FastAPI service is reachable beyond localhost.
-- [ ] Serve only explicitly allowed project output files rather than exposing the entire work directory.
-- [ ] Add strict upload size/type limits and media probing before expensive processing.
-- [ ] Add request/job rate limits appropriate for a personal workstation.
-- [ ] Tighten Firebase rules further and evaluate Firebase App Check for the hosted web app.
-- [ ] Keep an audit trail for destructive/project/publish actions.
+- [ ] Authentication if FastAPI is reachable beyond localhost.
+- [ ] Serve only explicitly allowed project outputs.
+- [ ] Strict upload size/type limits and media probing before expensive work.
+- [ ] Appropriate request/job rate limits.
+- [ ] Further tighten Firebase rules and evaluate App Check.
+- [ ] Audit trail for destructive/project/publishing actions.
 
-### 20. Offline-first PWA + resilient uploads
+## 20. Offline-first PWA + resilient uploads
 
-- [ ] Make the web UI installable as a PWA.
-- [ ] Queue job metadata locally while offline.
-- [ ] Use resumable/chunk-aware uploads for large phone recordings and survive browser/network interruptions.
-- [ ] Resume without uploading already completed objects again.
-- [ ] Clearly distinguish `uploaded`, `queued`, `claimed`, `processing`, `uploading results`, `publishing`, and `done`.
+- [ ] Installable PWA.
+- [ ] Local queue metadata while offline.
+- [ ] Resumable large-recording uploads across browser/network interruptions.
+- [ ] Resume without re-uploading completed objects.
+- [ ] Distinct `uploaded`, `queued`, `claimed`, `processing`, `uploading results`, `publishing`, `done` states.
 
 ---
 
-# Final acceptance matrix before calling Clipper production-ready
+# Production acceptance matrix
 
 ## Correctness
 
 - [ ] No clip references transcript words outside its rendered timeline.
-- [ ] Smart cuts never restore a gap selected for deletion.
-- [ ] Captions remain synchronized after smart cuts, punch-ins, multicam sync, and rerenders.
-- [ ] Separate mic/camera drift stays acceptably synchronized from beginning to end on a long real recording.
-- [ ] Changing any source/trim/style/logo/music/B-roll input invalidates only the render stages that actually depend on it.
-- [ ] Interrupted jobs resume/requeue without duplicate or corrupted output.
+- [ ] Smart cuts never restore a region selected for deletion.
+- [ ] Captions remain synchronized after smart cuts, punch-ins, sync, B-roll, and rerenders.
+- [ ] Separate mic/camera drift stays acceptably synchronized across a long real recording.
+- [ ] Changing source/trim/style/logo/music/B-roll invalidates only dependent stages.
+- [ ] Interrupted jobs recover without duplicate/corrupt output.
 
-## Quality
+## Visual quality
 
-- [ ] Subject tracking stays stable with one face, two faces, brief face loss, and fast movement.
-- [ ] Portrait, square, 4:5, and landscape layouts are manually reviewed on representative clips.
-- [ ] Captions/hooks/logos stay inside target-platform safe zones.
-- [ ] Audio passes headphones + phone-speaker checks without pumping/clipping.
-- [ ] B-roll is contextually correct and license/source metadata is retained.
+- [ ] Subject tracking is stable with one face, multiple faces, brief face loss, and fast movement.
+- [ ] 9:16, 4:5, 1:1, and 16:9 are manually reviewed on representative clips.
+- [ ] Captions/hooks/logos stay in target safe zones.
+- [ ] Context-aware B-roll appears over the correct spoken idea.
+- [ ] B-roll provenance/license metadata is retained.
+- [ ] No neighboring cues use distracting duplicate shots.
+
+## Audio quality
+
+- [ ] Headphones and phone-speaker checks pass without clipping, pumping, gating, or obvious sync error.
+- [ ] Music never masks speech.
+- [ ] B-roll source audio never leaks into final creator audio.
 
 ## Performance
 
-- [ ] A4000 CUDA transcription is confirmed in a real job.
-- [ ] NVENC is confirmed in a real final render.
-- [ ] Cache hit rerenders skip transcription, resolved B-roll downloads, generated-image inference, and unchanged final renders.
+- [ ] A4000 CUDA transcription confirmed in a real job.
+- [ ] NVENC confirmed in a real final render.
+- [ ] Cache-hit rerenders skip transcription, unchanged B-roll search/download/generation, and unchanged final encodes.
 - [ ] Proxy preview is measurably faster than final render once implemented.
-- [ ] Long projects do not grow Firebase inbox/local temporary storage without bound.
+- [ ] Local/Firebase temporary storage remains bounded.
 
 ## Security/reliability
 
-- [ ] Secrets are outside Git and logs.
-- [ ] Firebase user isolation is tested with two accounts.
+- [ ] Secrets stay outside Git and logs.
+- [ ] Firebase isolation tested with two accounts.
 - [ ] Self-hosted Actions never execute untrusted PR code.
-- [ ] Local API is localhost-only or authenticated when exposed to LAN.
+- [ ] Local API is localhost-only or authenticated on LAN.
 - [ ] Publishing retries cannot duplicate successful posts.
-- [ ] Backup/restore of project plan + transcript + source reference is proven.
+- [ ] Project plan + transcript + source reference backup/restore is proven.
 
 ## Definition of done
 
-Clipper is ready for daily production use when one real recording can be uploaded from the phone, processed on the A4000 workstation, edited non-destructively from the browser, rerendered quickly, reviewed in platform-safe previews, downloaded/published, recovered after a forced interruption, and reproduced later from its exact saved revision — with all automated tests and the real A4000 smoke lane green.
+Clipper is ready for daily production use when one real recording can be uploaded from the phone, processed on the A4000 workstation, edited non-destructively from the browser, automatically illustrated with context-aware B-roll, rerendered quickly, reviewed in target-platform previews, downloaded/published, recovered after a forced interruption, and reproduced later from its exact saved revision — with hosted CI and the real A4000 smoke lane green.
