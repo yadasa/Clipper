@@ -13,4 +13,8 @@ This pass adds ten creator-facing features that turn the automated pipeline into
 9. **Social metadata + thumbnail extraction** — each finished clip gets generated title/caption/hashtags plus a representative thumbnail image for the project library and publishing layer.
 10. **A4000-aware execution + stage cache/resume** — the local worker can auto-detect an NVIDIA RTX A4000-class machine, choose GPU-friendly Whisper/NVENC defaults, cache expensive stage outputs, and safely reuse completed work after interruption.
 
-Every feature in this document has a regression-test target. The GitHub Actions workflow runs a fast quality gate and a real FFmpeg/runtime smoke test on every push; an optional self-hosted A4000 job additionally exercises CUDA and NVENC when the repository variable `A4000_RUNNER_ENABLED=true` and a runner labeled `self-hosted, windows, x64, a4000` is online.
+## Recursive validation
+
+Each feature has regression coverage, and the every-push GitHub Actions workflow additionally installs the real runtime dependency set and FFmpeg before exercising synthetic video/audio renders. The V2 pass intentionally stress-tested sparse transcripts, silent video, temporary logo/music cleanup, malformed brand/caption values, missing optional FFmpeg filters, blank environment variables, and untrusted pull-request execution on the self-hosted GPU lane. Failures found during those passes were fixed in the implementation rather than merely hidden in tests.
+
+The optional A4000 lane performs a real faster-whisper/CTranslate2 CUDA inference and a real NVENC encode when the repository variable `A4000_RUNNER_ENABLED=true` and a runner labeled `self-hosted, Windows, X64, a4000` is online. It runs only for trusted `main` pushes or manual dispatches, never for pull-request code.
