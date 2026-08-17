@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, audio_encode_args, video_encode_args
+from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
 
 from .audio import has_audio
 from .media import duration as media_duration, probe
@@ -118,8 +118,10 @@ def apply_punch_ins(source_path: str | Path, events: list[PunchIn], output_path:
     if source_has_audio:
         cmd += ["-map", "[aout]"]
     cmd += video_encode_args(QUALITY_FAST)
+    # This is an edit intermediate, so preserve dynamics here and perform
+    # loudness normalization only once in the final delivery render.
     if source_has_audio:
-        cmd += [*audio_encode_args(), "-b:a", "192k"]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(out)]
     subprocess.run(cmd, check=True)
     return out
