@@ -343,18 +343,23 @@ class PexelsVideoProvider:
         payload = self._search(query)
         desired = max(1.0, cue.end - cue.start)
         videos = [item for item in payload.get("videos") or [] if isinstance(item, dict)]
-        ranked: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
-        for video in videos:
+        ranked: list[tuple[float, float, dict[str, Any], dict[str, Any]]] = []
+        for index, video in enumerate(videos):
             chosen = self._select_file(video)
             if chosen is None:
                 continue
             duration = float(video.get("duration") or 0)
             duration_score = 1.0 if duration >= desired else max(0.25, duration / desired)
-            ranked.append((duration_score, video, chosen))
+            # Pexels does not expose textual tags for video hits. Its ordered
+            # search rank is therefore semantic evidence; duration is only a
+            # secondary fitness signal rather than a fake fixed relevance score.
+            search_score = max(0.20, 0.82 - index * 0.06)
+            relevance = search_score * 0.88 + duration_score * 0.12
+            ranked.append((relevance, duration_score, video, chosen))
         if not ranked:
             return None
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        _, video, chosen = ranked[0]
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        relevance, _, video, chosen = ranked[0]
 
         video_id = str(video.get("id") or stable_hash(video)[:10])
         file_id = str(chosen.get("id") or stable_hash(chosen)[:8])
@@ -373,6 +378,7 @@ class PexelsVideoProvider:
             "creator": user.get("name"),
             "creator_url": user.get("url"),
             "source_url": source_url,
+            "search_query": query,
         }
         _write_json_atomic(local.with_suffix(local.suffix + ".json"), attribution)
         return BrollAsset(
@@ -381,7 +387,7 @@ class PexelsVideoProvider:
             provider=self.name,
             source_url=source_url,
             attribution=attribution,
-            relevance_score=0.72,
+            relevance_score=max(0.0, min(1.0, relevance)),
         )
 
 
@@ -433,22 +439,23 @@ class PixabayVideoProvider:
     def resolve(self, cue: VisualCue, query: str, output_dir: Path) -> BrollAsset | None:
         payload = self._search(query)
         desired = max(1.0, cue.end - cue.start)
-        ranked: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
-        for hit in payload.get("hits") or []:
-            if not isinstance(hit, dict):
-                continue
+        hits = [hit for hit in payload.get("hits") or [] if isinstance(hit, dict)]
+        ranked: list[tuple[float, float, dict[str, Any], dict[str, Any]]] = []
+        for index, hit in enumerate(hits):
             stream = self._select_stream(hit)
             if stream is None:
                 continue
             tags = str(hit.get("tags") or "")
-            relevance = _lexical_relevance(query, tags)
+            lexical = _lexical_relevance(query, tags)
+            search_rank = max(0.0, 1.0 - index / max(1, len(hits)))
+            relevance = lexical * 0.85 + search_rank * 0.15
             duration = float(hit.get("duration") or 0)
             duration_score = 1.0 if duration >= desired else max(0.25, duration / desired)
-            ranked.append((relevance * 0.8 + duration_score * 0.2, hit, stream))
+            ranked.append((relevance, duration_score, hit, stream))
         if not ranked:
             return None
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        score, hit, stream = ranked[0]
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        relevance, _, hit, stream = ranked[0]
 
         video_id = str(hit.get("id") or stable_hash(hit)[:10])
         cached = self.asset_cache / f"{video_id}.mp4"
@@ -466,6 +473,7 @@ class PixabayVideoProvider:
             "source_url": source_url,
             "license": "Pixabay Content License",
             "tags": hit.get("tags"),
+            "search_query": query,
         }
         _write_json_atomic(local.with_suffix(local.suffix + ".json"), attribution)
         return BrollAsset(
@@ -474,7 +482,7 @@ class PixabayVideoProvider:
             provider=self.name,
             source_url=source_url,
             attribution=attribution,
-            relevance_score=max(0.45, min(1.0, score)),
+            relevance_score=max(0.0, min(1.0, relevance)),
         )
 
 
@@ -497,10 +505,13 @@ class CommonsImageProvider:
             return None
         local = _materialize(path, output_dir)
         source_url = str(attribution.get("description_url") or "") or None
-        relevance = max(
-            0.55,
-            _lexical_relevance(query, str(attribution.get("page_title") or "")),
-        )
+        lexical = _lexical_relevance(query, str(attribution.get("page_title") or ""))
+        # A first-page Commons search result contributes only weak evidence on
+        # its own. At least some title/query agreement is needed to clear the
+        # default relevance threshold.
+        relevance = min(1.0, 0.15 + lexical * 0.85)
+        attribution = dict(attribution)
+        attribution["search_query"] = query
         return BrollAsset(
             path=local,
             media_type="image",
@@ -594,6 +605,29 @@ def _apply_asset(cue: VisualCue, asset: BrollAsset) -> None:
     cue.relevance_score = round(float(asset.relevance_score), 4)
 
 
+def _asset_identity(asset: BrollAsset) -> str:
+    if asset.source_url:
+        return "url:" + asset.source_url.strip().lower()
+    try:
+        return "file:" + file_fingerprint(asset.path, sample_bytes=256 * 1024)
+    except OSError:
+        return "path:" + str(asset.path.resolve()).lower()
+
+
+def _cue_identity(cue: VisualCue) -> str | None:
+    if cue.source_url:
+        return "url:" + cue.source_url.strip().lower()
+    if not cue.asset_path:
+        return None
+    path = Path(cue.asset_path).expanduser()
+    if not path.is_file():
+        return None
+    try:
+        return "file:" + file_fingerprint(path, sample_bytes=256 * 1024)
+    except OSError:
+        return "path:" + str(path.resolve()).lower()
+
+
 def resolve_broll(
     cues: list[VisualCue],
     output_dir: str | Path,
@@ -605,7 +639,8 @@ def resolve_broll(
     then configured stock providers, then Commons, then optional local generation.
     Manual cue assets are never overwritten. Remote search responses and files are
     cached outside the project; selected assets are hard-linked or copied into the
-    project so rerenders remain self-contained.
+    project so rerenders remain self-contained. Exact asset reuse is avoided within
+    a clip so neighboring automatic cues do not repeat the same cutaway.
     """
     settings = settings or Settings()
     if not settings.broll_auto_insert or not cues:
@@ -615,6 +650,7 @@ def resolve_broll(
     output_root.mkdir(parents=True, exist_ok=True)
     timeout = httpx.Timeout(connect=10.0, read=45.0, write=45.0, pool=10.0)
     headers = {"User-Agent": "Clipper/0.2 local creator editor"}
+    used_assets: set[str] = set()
 
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
         providers = _build_providers(settings, client)
@@ -626,6 +662,9 @@ def resolve_broll(
             if existing and existing.is_file():
                 cue.asset_type = _media_type(existing, cue.asset_type)
                 cue.provider = cue.provider or "manual"
+                identity = _cue_identity(cue)
+                if identity:
+                    used_assets.add(identity)
                 continue
 
             queries = _query_variants(cue)
@@ -656,7 +695,12 @@ def resolve_broll(
                             settings.broll_min_relevance,
                         )
                         continue
+                    identity = _asset_identity(candidate)
+                    if identity in used_assets:
+                        logger.info("Rejected duplicate %s B-roll asset for cue %d", provider.name, index)
+                        continue
                     selected = candidate
+                    used_assets.add(identity)
                     break
                 if selected is not None:
                     break
