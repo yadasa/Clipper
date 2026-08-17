@@ -36,6 +36,7 @@ class Settings:
     diffusion_model: str = os.getenv("DIFFUSION_MODEL", "")
     brand_kit_path: str = os.getenv("BRAND_KIT", "")
     music_path: str = os.getenv("BACKGROUND_MUSIC", "")
+    caption_preset: str = os.getenv("CAPTION_PRESET", "karaoke")
     smart_cut: bool = _bool_env("SMART_CUT", True)
     remove_fillers: bool = _bool_env("REMOVE_FILLERS", True)
     punch_ins: bool = _bool_env("PUNCH_INS", True)
