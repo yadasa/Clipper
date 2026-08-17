@@ -16,6 +16,13 @@ ASPECT_PRESETS = {
 }
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 @dataclass(slots=True)
 class Settings:
     workdir: Path = field(default_factory=lambda: Path(os.getenv("CLIPPER_WORKDIR", "./data")).resolve())
@@ -25,11 +32,16 @@ class Settings:
     max_clips: int = int(os.getenv("MAX_CLIPS", "8"))
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    # Commons works without a key, so transcript-aware visuals are on by default.
-    # Set to diffusers for fully local generation, auto for Commons->Diffusers fallback,
-    # or none to disable visual inserts.
     visual_provider: str = os.getenv("VISUAL_PROVIDER", "commons").lower()
     diffusion_model: str = os.getenv("DIFFUSION_MODEL", "")
+    brand_kit_path: str = os.getenv("BRAND_KIT", "")
+    music_path: str = os.getenv("BACKGROUND_MUSIC", "")
+    smart_cut: bool = _bool_env("SMART_CUT", True)
+    remove_fillers: bool = _bool_env("REMOVE_FILLERS", True)
+    punch_ins: bool = _bool_env("PUNCH_INS", True)
+    hook_overlay: bool = _bool_env("HOOK_OVERLAY", True)
+    stage_cache: bool = _bool_env("STAGE_CACHE", True)
+    auto_hardware_profile: bool = _bool_env("AUTO_HARDWARE_PROFILE", True)
     firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "")
     firebase_storage_bucket: str = os.getenv("FIREBASE_STORAGE_BUCKET", "")
     firebase_poll_seconds: int = int(os.getenv("FIREBASE_POLL_SECONDS", "8"))
@@ -41,6 +53,12 @@ class Settings:
         self.workdir.mkdir(parents=True, exist_ok=True)
         (self.workdir / "projects").mkdir(exist_ok=True)
         (self.workdir / "cache").mkdir(exist_ok=True)
+
+    def apply_hardware_profile(self):
+        if not self.auto_hardware_profile:
+            return None
+        from .hardware import apply_profile_defaults
+        return apply_profile_defaults(self)
 
 
 def normalize_ratios(ratios: list[str] | tuple[str, ...] | None) -> list[str]:
