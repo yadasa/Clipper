@@ -5,8 +5,9 @@ import tempfile
 from pathlib import Path
 
 from clipper.brand import BrandKit
-from clipper.models import ClipCandidate, VisualCue, Word
+from clipper.models import ClipCandidate, Segment, SyncMap, Transcript, VisualCue, Word
 from clipper.motion import PunchIn, apply_punch_ins
+from clipper.multicam import build_multicam_master, replace_audio_with_synced_track
 from clipper.render import render_clip
 from clipper.smartcut import KeepInterval, build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
 
@@ -46,6 +47,9 @@ def main() -> int:
         broll = root / "broll.mp4"
         music = root / "music.m4a"
         logo = root / "logo.png"
+        mic = root / "mic.m4a"
+        multicam_primary = root / "multicam-primary.mp4"
+        multicam_secondary = root / "multicam-secondary.mp4"
 
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -70,6 +74,11 @@ def main() -> int:
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "sine=frequency=180:sample_rate=48000",
             "-t", "1", "-c:a", "aac", str(music),
+        ])
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=720:sample_rate=48000",
+            "-t", "3.2", "-c:a", "aac", str(mic),
         ])
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -159,6 +168,55 @@ def main() -> int:
         silent_motion = root / "silent-motion.mp4"
         apply_punch_ins(silent_cut, [PunchIn(0.2, 0.8, 1.08)], silent_motion)
         assert_video(silent_motion, width=480, height=270)
+
+        synced_audio = root / "synced-audio.mp4"
+        replace_audio_with_synced_track(
+            source,
+            mic,
+            SyncMap(str(mic), intercept_seconds=0.0, rate=1.0, confidence=1.0, method="smoke"),
+            synced_audio,
+        )
+        assert_video(synced_audio, width=640, height=360)
+
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "8.2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "31",
+            "-c:a", "aac", "-pix_fmt", "yuv420p", str(multicam_primary),
+        ])
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24",
+            "-t", "8.2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "31",
+            "-pix_fmt", "yuv420p", "-an", str(multicam_secondary),
+        ])
+        multicam_transcript = Transcript(
+            text="first section second section",
+            language="en",
+            duration=8.0,
+            segments=[
+                Segment(0.0, 4.0, "first section"),
+                Segment(4.0, 8.0, "second section"),
+            ],
+        )
+        multicam = root / "multicam.mp4"
+        build_multicam_master(
+            multicam_primary,
+            [(
+                multicam_secondary,
+                SyncMap(
+                    str(multicam_secondary),
+                    intercept_seconds=0.0,
+                    rate=1.0,
+                    confidence=1.0,
+                    method="smoke",
+                ),
+            )],
+            multicam_transcript,
+            multicam,
+        )
+        assert_video(multicam, width=320, height=180)
 
         print("Clipper FFmpeg feature smoke passed.")
     return 0
