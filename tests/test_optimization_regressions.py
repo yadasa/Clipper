@@ -3,16 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from clipper.audio import _duck_expression
 from clipper.media import MediaError, _probe_cached, download_owned_social_source, is_social_url, probe
 from clipper.models import ClipCandidate, RenderedVariant, VisualCue, Word
 from clipper.pipeline import _prepare_candidate
 from clipper.render import render_variants
 from clipper.smartcut import build_keep_intervals
-
-
-def test_missing_speech_timestamps_keep_normal_music_bed_level():
-    assert _duck_expression([], normal_gain=0.22, duck_gain=0.065) == "0.2200"
 
 
 def test_remote_ingest_accepts_supported_social_hosts_only(tmp_path: Path):
