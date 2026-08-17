@@ -31,6 +31,7 @@ def _valid_color(value: str, fallback: str) -> str:
 
 
 def normalize_brand(data: dict | None) -> BrandKit:
+    """Validate style values without resolving project-relative asset paths."""
     data = dict(data or {})
     kit = BrandKit(
         name=str(data.get("name") or "default")[:80],
@@ -47,8 +48,6 @@ def normalize_brand(data: dict | None) -> BrandKit:
         kit.caption_preset = "karaoke"
     if kit.logo_position not in {"top-left", "top-right", "bottom-left", "bottom-right"}:
         kit.logo_position = "top-right"
-    if kit.logo_path and not Path(kit.logo_path).expanduser().is_file():
-        kit.logo_path = None
     return kit
 
 
