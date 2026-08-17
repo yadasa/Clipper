@@ -114,25 +114,39 @@ def validate_edit_plan(plan: dict) -> dict:
 
 
 def _persist_asset(value: str | None, project_root: Path, stem: str) -> str | None:
-    """Copy an external plan asset into the project and return a relative path."""
+    """Keep a plan asset self-contained and return a project-relative path.
+
+    Existing files already inside the project are reused. Absolute paths and
+    relative paths that resolve outside the project are copied into ``assets/``;
+    this prevents ``../`` references from making a supposedly portable rerender
+    depend on arbitrary files elsewhere on the workstation.
+    """
     if not value:
         return None
+    root = project_root.resolve()
     source = Path(value).expanduser()
     if not source.is_absolute():
-        existing = (project_root / source).resolve()
-        if existing.is_file():
-            return source.as_posix()
+        resolved = (root / source).resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            source = resolved
+        else:
+            if resolved.is_file():
+                return relative.as_posix()
+            source = resolved
+    else:
         source = source.resolve()
     if not source.is_file():
         return None
 
-    assets = project_root / "assets"
+    assets = root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     suffix = source.suffix.lower() or ".bin"
     destination = assets / f"{stem}{suffix}"
-    if source.resolve() != destination.resolve():
+    if source != destination.resolve():
         shutil.copy2(source, destination)
-    return destination.relative_to(project_root).as_posix()
+    return destination.relative_to(root).as_posix()
 
 
 def save_edit_plan(plan: dict, path: str | Path) -> Path:
