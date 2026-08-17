@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
-import { getFirestore, collection, doc, getDocs, query, setDoc, serverTimestamp, where } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
+import { getFirestore, collection, doc, getDoc, getDocs, query, setDoc, serverTimestamp, where } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
 import { getStorage, ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -174,6 +174,7 @@ async function queueJob() {
   const totalBytes=allUploads.reduce((sum,file)=>sum+file.size,0);
   const uploadedPaths=[];
   let sent=0;
+  let jobCreated=false;
   const base={
     userId:currentUser.uid,
     status:'queued',
@@ -228,12 +229,21 @@ async function queueJob() {
       extras.logoStoragePath=await uploadOne(logoFile,path,sent,totalBytes); uploadedPaths.push(path); sent+=logoFile.size;
     }
     await setDoc(jobRef,{...base,...extras});
+    jobCreated=true;
     setProgress(totalBytes?100:null); setMessage('Queued. Your home computer will claim it when the worker is online.');
     if(totalBytes) setTimeout(()=>setProgress(null),700);
     await loadProjects();
   } catch(error) {
     setProgress(null);
-    if (uploadedPaths.length) await cleanupUploadedPaths(uploadedPaths);
+    // A network timeout can make setDoc's result ambiguous: the server may have
+    // accepted the job even though the client saw an error. Verify before deleting
+    // uploaded sources; if verification itself fails, preserve them rather than
+    // breaking a potentially live queue item.
+    if (!jobCreated && uploadedPaths.length) {
+      let definitelyNotQueued=false;
+      try { definitelyNotQueued=!(await getDoc(jobRef)).exists(); } catch {}
+      if (definitelyNotQueued) await cleanupUploadedPaths(uploadedPaths);
+    }
     setMessage(error.message||String(error),true);
   } finally { updateQueueButton(); }
 }
