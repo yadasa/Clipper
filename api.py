@@ -22,7 +22,7 @@ incoming_dir = settings.workdir / "incoming"
 incoming_dir.mkdir(exist_ok=True)
 (settings.workdir / "local_jobs").mkdir(exist_ok=True)
 
-app = FastAPI(title="Clipper Local API", version="0.2.2")
+app = FastAPI(title="Clipper Local API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5175"],
@@ -30,8 +30,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# One local heavy job at a time by default. Multiple FFmpeg/transcription jobs
-# competing for the same A4000 can increase wall time and trigger avoidable OOMs.
 _processing_lock = threading.Lock()
 _UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 try:
@@ -55,7 +53,6 @@ def _write_job(job_id: str, payload: dict) -> None:
 
 
 def _stage_upload(upload: UploadFile, prefix: str, default_suffix: str = ".bin") -> str:
-    """Stage one upload atomically and with a hard byte limit."""
     suffix = Path(upload.filename or f"upload{default_suffix}").suffix.lower() or default_suffix
     staging = incoming_dir / f"{prefix}-{uuid.uuid4().hex}{suffix}"
     temp = staging.with_name(staging.name + ".part")
@@ -89,7 +86,6 @@ def _stage_upload(upload: UploadFile, prefix: str, default_suffix: str = ".bin")
 
 
 def _require_media_stream(path: str, stream_type: str, label: str) -> None:
-    """Reject mislabeled/garbled uploads before transcription or rendering starts."""
     try:
         info = probe(path)
     except Exception as exc:
@@ -113,6 +109,7 @@ def _cleanup_staged(paths: list[str]) -> None:
 
 def _build_job_settings(
     *,
+    automation_mode: str,
     smart_cut: bool,
     remove_fillers: bool,
     punch_ins: bool,
@@ -126,6 +123,7 @@ def _build_job_settings(
     staged_paths: list[str],
 ) -> Settings:
     job_settings = replace(settings)
+    job_settings.automation_mode = automation_mode
     job_settings.smart_cut = smart_cut
     job_settings.remove_fillers = remove_fillers
     job_settings.punch_ins = punch_ins
@@ -164,7 +162,7 @@ def _run_local_job(
 ) -> None:
     try:
         with _processing_lock:
-            _write_job(job_id, {"job_id": job_id, "status": "processing"})
+            _write_job(job_id, {"job_id": job_id, "status": "processing", "mode": job_settings.automation_mode})
             try:
                 manifest = process_video(
                     source,
@@ -211,6 +209,7 @@ def health():
     return {
         "ok": True,
         "mode": "local",
+        "defaultAutomationMode": settings.automation_mode,
         "workdir": str(settings.workdir),
         "hardware": profile.to_dict() if profile else None,
         "maxUploadMb": _MAX_UPLOAD_BYTES // (1024 * 1024),
@@ -235,11 +234,6 @@ def local_job(job_id: str):
 
 @app.get("/media/{project_id}/{relative_path:path}")
 def project_media(project_id: str, relative_path: str):
-    """Serve only finished media inside a project's clips directory.
-
-    The old blanket workdir mount exposed source recordings, transcripts, worker
-    inbox files, and internal state to any client that could reach the local API.
-    """
     root = _project_root(project_id)
     clips_root = (root / "clips").resolve()
     target = (root / relative_path).resolve()
@@ -270,6 +264,7 @@ def process(
     source_url: str = Form(default=""),
     own_content_ack: bool = Form(default=False),
     ratios: str = Form(default="9:16"),
+    automation_mode: str = Form(default="auto"),
     alternate_visual_layouts: bool = Form(default=False),
     smart_cut: bool = Form(default=True),
     remove_fillers: bool = Form(default=True),
@@ -284,6 +279,9 @@ def process(
         requested = normalize_ratios([value.strip() for value in ratios.split(",") if value.strip()])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    automation_mode = automation_mode.strip().lower()
+    if automation_mode not in {"auto", "manual"}:
+        raise HTTPException(400, "automation_mode must be auto or manual")
     source_url = source_url.strip()
     if file is None and not source_url:
         raise HTTPException(400, "Upload a file or provide a source URL")
@@ -330,6 +328,7 @@ def process(
             _require_media_stream(logo_path, "video", "Logo upload")
 
         job_settings = _build_job_settings(
+            automation_mode=automation_mode,
             smart_cut=smart_cut,
             remove_fillers=remove_fillers,
             punch_ins=punch_ins,
@@ -347,7 +346,7 @@ def process(
         raise
 
     job_id = uuid.uuid4().hex[:16]
-    _write_job(job_id, {"job_id": job_id, "status": "queued"})
+    _write_job(job_id, {"job_id": job_id, "status": "queued", "mode": automation_mode})
     background_tasks.add_task(
         _run_local_job,
         job_id,
@@ -360,4 +359,4 @@ def process(
         job_settings,
         staged_paths,
     )
-    return {"job_id": job_id, "status": "queued"}
+    return {"job_id": job_id, "status": "queued", "mode": automation_mode}
