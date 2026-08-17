@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import math
 import re
-from collections import Counter
 
 from .models import ClipCandidate
 
@@ -27,8 +25,7 @@ def _tokens(text: str) -> list[str]:
 
 
 def topic_terms(text: str) -> set[str]:
-    terms = {token for token in _tokens(text) if len(token) >= 4 and token not in _STOPWORDS}
-    return terms
+    return {token for token in _tokens(text) if len(token) >= 4 and token not in _STOPWORDS}
 
 
 def topic_similarity(a: str, b: str) -> float:
@@ -41,24 +38,35 @@ def topic_similarity(a: str, b: str) -> float:
 def score_text(text: str, duration: float) -> dict[str, float]:
     tokens = _tokens(text)
     if not tokens or duration <= 0:
-        return {key: 0.0 for key in ("hook", "clarity", "specificity", "payoff", "pace", "completeness", "overall")}
+        return {
+            key: 0.0
+            for key in ("hook", "clarity", "specificity", "payoff", "pace", "completeness", "overall")
+        }
 
     count = len(tokens)
     starts = tokens[:18]
-    hook_hits = sum(1 for t in starts if t in _HOOK)
-    hook = min(100.0, 28.0 * hook_hits + (22.0 if "?" in text[:220] else 0.0) + min(28.0, len(starts) * 1.5))
+    hook_hits = sum(1 for token in starts if token in _HOOK)
+    hook = min(
+        100.0,
+        28.0 * hook_hits + (22.0 if "?" in text[:220] else 0.0) + min(28.0, len(starts) * 1.5),
+    )
 
     sentence_count = max(1, len(re.findall(r"[.!?]+", text)))
     avg_sentence = count / sentence_count
-    filler_count = sum(1 for t in tokens if t in {"um", "uh", "erm", "hmm", "basically", "literally"})
+    filler_count = sum(
+        1 for token in tokens if token in {"um", "uh", "erm", "hmm", "basically", "literally"}
+    )
     clarity = max(0.0, min(100.0, 92.0 - abs(avg_sentence - 15.0) * 1.7 - filler_count * 4.0))
 
     numbers = len(re.findall(r"\b\d+(?:[.,]\d+)?%?\b", text))
     properish = len(re.findall(r"\b[A-Z][a-z]{2,}\b", text))
     specificity = min(100.0, 20.0 + numbers * 15.0 + min(45.0, properish * 5.0))
 
-    payoff_hits = sum(1 for t in tokens[-40:] if t in _PAYOFF)
-    payoff = min(100.0, 22.0 + payoff_hits * 18.0 + (22.0 if re.search(r"[.!?][\"']?\s*$", text.strip()) else 0.0))
+    payoff_hits = sum(1 for token in tokens[-40:] if token in _PAYOFF)
+    payoff = min(
+        100.0,
+        22.0 + payoff_hits * 18.0 + (22.0 if re.search(r"[.!?][\"']?\s*$", text.strip()) else 0.0),
+    )
 
     words_per_second = count / max(duration, 0.01)
     # Conversational short-form speech tends to feel energetic around ~2.2–3.3 w/s.
@@ -111,11 +119,18 @@ def diverse_top_candidates(
     If diversity removes too many candidates, the best skipped items are backfilled
     so users still get the requested number when enough valid candidates exist.
     """
-    ranked = sorted((c for c in candidates if c.score >= min_score), key=lambda c: c.score, reverse=True)
+    ranked = sorted(
+        (candidate for candidate in candidates if candidate.score >= min_score),
+        key=lambda candidate: candidate.score,
+        reverse=True,
+    )
     selected: list[ClipCandidate] = []
     skipped: list[ClipCandidate] = []
     for candidate in ranked:
-        if all(topic_similarity(candidate.transcript, chosen.transcript) <= max_similarity for chosen in selected):
+        if all(
+            topic_similarity(candidate.transcript, chosen.transcript) <= max_similarity
+            for chosen in selected
+        ):
             selected.append(candidate)
         else:
             skipped.append(candidate)
