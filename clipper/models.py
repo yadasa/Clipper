@@ -100,6 +100,7 @@ class ProjectManifest:
     source_name: str
     created_at: str
     ratios: list[str]
+    render_source_path: str | None = None
     transcript_path: str | None = None
     edit_plan_path: str | None = None
     hardware_profile: dict[str, Any] = field(default_factory=dict)
