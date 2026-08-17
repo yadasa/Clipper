@@ -91,12 +91,16 @@ def apply_punch_ins(source_path: str | Path, events: list[PunchIn], output_path:
     filters: list[str] = []
     parts: list[str] = []
     for index, (start, end, scale) in enumerate(segments):
+        # concat requires identical geometry *and* sample-aspect-ratio. Scaling a
+        # zoom segment changes SAR unless it is normalized explicitly, which can
+        # make FFmpeg reject the whole graph even though every segment is the same
+        # pixel dimensions after crop. Force setsar=1 on every branch.
         video = f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS"
         if scale > 1.001:
             scaled_w = int(round(width * scale / 2) * 2)
             scaled_h = int(round(height * scale / 2) * 2)
             video += f",scale={scaled_w}:{scaled_h},crop={width}:{height}:(iw-ow)/2:(ih-oh)/2"
-        video += f"[v{index}]"
+        video += f",setsar=1[v{index}]"
         filters.append(video)
         if source_has_audio:
             filters.append(f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{index}]")
