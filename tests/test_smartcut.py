@@ -43,7 +43,20 @@ def test_remap_words_moves_later_words_onto_compact_timeline():
     )
     mapped = remap_words(words, intervals)
     assert [word.text for word in mapped] == ["one", "two"]
-    assert mapped[1].start < 2.0
+    # Test the actual invariant rather than coupling this regression to one
+    # particular silence-retention constant: the later word must move earlier
+    # by exactly the amount of timeline removed before it.
+    removed_before_two = sum(
+        max(0.0, min(interval.start, words[1].start) - previous_end)
+        for previous_end, interval in zip(
+            [candidate.start, *[item.end for item in intervals[:-1]]],
+            intervals,
+        )
+        if interval.start < words[1].start
+    )
+    assert mapped[1].start < words[1].start
+    assert mapped[1].start <= compact_duration(intervals)
+    assert removed_before_two >= 0
 
 
 def test_sparse_transcript_cannot_remove_more_than_damage_budget():
