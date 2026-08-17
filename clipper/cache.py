@@ -3,22 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 
-def file_fingerprint(path: str | Path, *, sample_bytes: int = 1024 * 1024) -> str:
-    """Fast, copy-stable content fingerprint for large media files.
-
-    Cache identity must survive Firebase/local ingest copying the same recording
-    into a new project, so filesystem mtime is deliberately excluded. Instead we
-    hash file size plus sampled content from the beginning, middle, and end. The
-    middle sample closes the old blind spot where two same-size files with equal
-    first/last megabytes could collide even if their actual video payload differed.
-    """
-    p = Path(path)
-    stat = p.stat()
-    size = int(stat.st_size)
+@lru_cache(maxsize=512)
+def _fingerprint_cached(
+    resolved_path: str,
+    size: int,
+    mtime_ns: int,
+    sample_bytes: int,
+) -> str:
+    """Hash sampled media content once per unchanged filesystem object."""
+    del mtime_ns
     sample = max(64 * 1024, int(sample_bytes))
     h = hashlib.sha256()
     h.update(b"clipper-media-fingerprint-v2\0")
@@ -31,7 +29,7 @@ def file_fingerprint(path: str | Path, *, sample_bytes: int = 1024 * 1024) -> st
             max(0, size - sample),
         ])
 
-    with p.open("rb") as handle:
+    with Path(resolved_path).open("rb") as handle:
         for offset in sorted(set(offsets)):
             handle.seek(offset)
             chunk = handle.read(sample)
@@ -39,6 +37,26 @@ def file_fingerprint(path: str | Path, *, sample_bytes: int = 1024 * 1024) -> st
             h.update(b"\0")
             h.update(chunk)
     return h.hexdigest()
+
+
+def file_fingerprint(path: str | Path, *, sample_bytes: int = 1024 * 1024) -> str:
+    """Fast, copy-stable content fingerprint for large media files.
+
+    Cache identity must survive Firebase/local ingest copying the same recording
+    into a new project, so filesystem mtime is deliberately excluded from the
+    resulting digest. The local memoization key *does* include mtime so repeated
+    signature calculations for an unchanged file do not reread megabytes of
+    media. Beginning, middle, and end samples protect against same-size files that
+    differ away from their first/last blocks.
+    """
+    p = Path(path).expanduser().resolve()
+    stat = p.stat()
+    return _fingerprint_cached(
+        str(p),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        max(64 * 1024, int(sample_bytes)),
+    )
 
 
 def stable_hash(value: Any) -> str:
