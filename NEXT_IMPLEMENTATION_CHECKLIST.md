@@ -6,17 +6,33 @@ This file is the canonical engineering backlog for the next Clipper sessions. Co
 
 - [x] Regression coverage for cache invalidation, smart cuts, clip selection, project assets, visual reuse, and damaged render outputs.
 - [x] Smart-cut intervals never bridge across a region explicitly selected for removal.
-- [x] Media fingerprints are copy-stable and sample the beginning, middle, and end of large files.
+- [x] Automatic filler removal is limited to reliable disfluencies instead of deleting context-dependent words such as `actually`, `like`, or `basically`.
+- [x] Smart-cut and punch-in intermediates are written to partial files and atomically finalized so interrupted encodes are not reused as valid media.
+- [x] No-op smart-cut/punch-in analysis skips unnecessary intermediate video encodes.
+- [x] Media fingerprints are copy-stable, sample the beginning/middle/end of large files, and are memoized without changing their content identity.
+- [x] FFprobe metadata is memoized and invalidated when a file is replaced in place.
+- [x] Face-tracking cache is bounded and invalidates on source file replacement instead of growing for the lifetime of the desktop worker.
+- [x] CUDA batched Whisper pipelines are reused across transcriptions rather than reconstructed for each source.
 - [x] Clip scoring, hooks, metadata, and visual planning use only transcript words inside the selected clip.
 - [x] Rerender logo/music assets are contained inside the project instead of escaping through relative paths.
 - [x] Commons and Diffusers still-image assets are cached across unchanged rerenders.
 - [x] Render signatures include source, B-roll, logo, music, trim, layout, caption, and hook dependencies.
 - [x] Tiny/truncated cached render files are rejected.
 - [x] Context-aware B-roll provider architecture is isolated in `clipper/broll.py` and documented in `BROLL_ARCHITECTURE.md`.
-- [x] Automatic B-roll timing is planned from spoken phrases and corrected against word timestamps before rendering.
+- [x] Automatic B-roll timing is planned from spoken phrases, corrected against word timestamps once, and reused across aspect-ratio/layout render fan-out.
 - [x] Both still-image and video B-roll can be composed as split-screen, PIP, or full-screen interruption.
 - [x] Remote B-roll search responses/downloads are cached and selected assets are materialized inside the project.
+- [x] B-roll relevance scores act as real rejection gates rather than fixed minimum scores that force unrelated provider results through.
+- [x] Exact B-roll asset identity is tracked within a clip so later automatic cues do not reuse the identical cutaway.
 - [x] Provider failures degrade to the next configured source rather than failing the whole edit.
+- [x] Local API heavy jobs are serialized by default to avoid competing GPU/FFmpeg workloads on one workstation.
+- [x] Local API uploads are byte-bounded, chunk-staged, and atomically finalized; unsupported arbitrary remote URLs are rejected before processing.
+- [x] Local API media serving exposes only finished project clip media instead of mounting the entire work directory.
+- [x] Firebase stale-job recovery transactionally re-checks the lease before requeueing, removing the heartbeat/requeue race.
+- [x] Firebase inbox downloads are atomic and per-job temporary inbox data is removed after processing.
+- [x] Firebase project records retain B-roll visual-cue provenance for the web library.
+- [x] Browser upload failures clean up already-uploaded Firebase source objects instead of leaving orphaned blobs.
+- [x] Firebase Storage rules allow client writes only to the user's source inbox; worker-produced project outputs are client read-only.
 
 ---
 
@@ -142,6 +158,7 @@ The first goal is one proven phone -> Firebase -> A4000 desktop -> Firebase -> b
 - [x] Bound remote download size and use atomic partial-file writes.
 - [x] Ignore B-roll audio; creator speech/music remains authoritative.
 - [x] Loop short video B-roll only for the required cue window.
+- [x] Reject exact asset reuse within the same clip.
 - [ ] Add embedding-based semantic reranking after provider search.
 - [ ] Add visual quality scoring for blur, watermarks, severe compression, bad aspect, and unsafe/irrelevant content.
 - [ ] Add perceptual duplicate detection so neighboring cues do not reuse near-identical shots.
@@ -286,10 +303,12 @@ The first goal is one proven phone -> Firebase -> A4000 desktop -> Firebase -> b
 ## 19. LAN/API security hardening
 
 - [ ] Authentication if FastAPI is reachable beyond localhost.
-- [ ] Serve only explicitly allowed project outputs.
-- [ ] Strict upload size/type limits and media probing before expensive work.
-- [ ] Appropriate request/job rate limits.
-- [ ] Further tighten Firebase rules and evaluate App Check.
+- [x] Serve only explicitly allowed finished project media; do not mount the complete work directory.
+- [x] Bound local upload byte size and stage uploads atomically.
+- [ ] Validate uploaded media types/content with probing before expensive work.
+- [ ] Appropriate request/job rate limits if the API is exposed beyond localhost.
+- [x] Prevent browser clients from overwriting worker-produced Firebase project outputs.
+- [ ] Evaluate Firebase App Check for the hosted uploader.
 - [ ] Audit trail for destructive/project/publishing actions.
 
 ## 20. Offline-first PWA + resilient uploads
