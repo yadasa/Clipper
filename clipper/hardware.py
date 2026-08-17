@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass, asdict
+
+
+@dataclass(slots=True, frozen=True)
+class HardwareProfile:
+    name: str
+    gpu_name: str | None
+    cuda: bool
+    nvenc: bool
+    vram_gib: float | None
+    whisper_model: str
+    whisper_batch_size: int
+    render_workers: int
+    encoder: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _nvidia_info() -> tuple[str | None, float | None]:
+    if not shutil.which("nvidia-smi"):
+        return None, None
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        first = result.stdout.strip().splitlines()[0]
+        name, memory_mib = [part.strip() for part in first.rsplit(",", 1)]
+        return name, float(memory_mib) / 1024.0
+    except Exception:
+        return None, None
+
+
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _nvenc_available() -> bool:
+    try:
+        from ffmpeg_utils import nvenc_available
+        return bool(nvenc_available())
+    except Exception:
+        return False
+
+
+def detect_hardware_profile() -> HardwareProfile:
+    """Return conservative automatic defaults for the current workstation.
+
+    RTX A4000 has enough VRAM for faster-whisper large-v3 in float16 while still
+    leaving useful headroom for NVENC and ordinary editing. Explicit environment
+    variables always win later in ``apply_profile_defaults``.
+    """
+    gpu_name, vram = _nvidia_info()
+    cuda = _cuda_available()
+    nvenc = _nvenc_available() if gpu_name else False
+    upper = (gpu_name or "").upper()
+
+    if cuda and "A4000" in upper:
+        return HardwareProfile(
+            name="nvidia-a4000",
+            gpu_name=gpu_name,
+            cuda=True,
+            nvenc=nvenc,
+            vram_gib=vram,
+            whisper_model="large-v3",
+            whisper_batch_size=8,
+            render_workers=2,
+            encoder="nvenc" if nvenc else "x264",
+        )
+    if cuda and (vram or 0) >= 12:
+        return HardwareProfile(
+            name="nvidia-12gb-plus",
+            gpu_name=gpu_name,
+            cuda=True,
+            nvenc=nvenc,
+            vram_gib=vram,
+            whisper_model="large-v3",
+            whisper_batch_size=6,
+            render_workers=2,
+            encoder="nvenc" if nvenc else "x264",
+        )
+    if cuda:
+        return HardwareProfile(
+            name="nvidia-cuda",
+            gpu_name=gpu_name,
+            cuda=True,
+            nvenc=nvenc,
+            vram_gib=vram,
+            whisper_model="medium",
+            whisper_batch_size=4,
+            render_workers=2,
+            encoder="nvenc" if nvenc else "x264",
+        )
+    return HardwareProfile(
+        name="cpu",
+        gpu_name=gpu_name,
+        cuda=False,
+        nvenc=False,
+        vram_gib=vram,
+        whisper_model="small",
+        whisper_batch_size=1,
+        render_workers=max(1, min(2, (os.cpu_count() or 2) // 4 or 1)),
+        encoder="x264",
+    )
+
+
+def apply_profile_defaults(settings, profile: HardwareProfile | None = None):
+    """Mutate a Settings instance only for values the user did not explicitly set."""
+    profile = profile or detect_hardware_profile()
+    if "WHISPER_MODEL" not in os.environ:
+        settings.whisper_model = profile.whisper_model
+    if "WHISPER_BATCH_SIZE" not in os.environ:
+        settings.whisper_batch_size = profile.whisper_batch_size
+    if "WHISPER_DEVICE" not in os.environ:
+        settings.whisper_device = "cuda" if profile.cuda else "cpu"
+    if "FFMPEG_ENCODER" not in os.environ:
+        os.environ["FFMPEG_ENCODER"] = profile.encoder
+    if "RENDER_WORKERS" not in os.environ:
+        os.environ["RENDER_WORKERS"] = str(profile.render_workers)
+    return profile
