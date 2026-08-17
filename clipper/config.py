@@ -25,7 +25,10 @@ class Settings:
     max_clips: int = int(os.getenv("MAX_CLIPS", "8"))
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    visual_provider: str = os.getenv("VISUAL_PROVIDER", "none").lower()
+    # Commons works without a key, so transcript-aware visuals are on by default.
+    # Set to diffusers for fully local generation, auto for Commons->Diffusers fallback,
+    # or none to disable visual inserts.
+    visual_provider: str = os.getenv("VISUAL_PROVIDER", "commons").lower()
     diffusion_model: str = os.getenv("DIFFUSION_MODEL", "")
     firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "")
     firebase_storage_bucket: str = os.getenv("FIREBASE_STORAGE_BUCKET", "")
