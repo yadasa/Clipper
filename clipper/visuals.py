@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -22,10 +23,48 @@ def _safe_name(value: str) -> str:
     return value[:64] or "visual"
 
 
+def _cache_key(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def _read_attribution(path: Path) -> dict:
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if not sidecar.is_file():
+        return {}
+    try:
+        return json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | None, dict]:
+    safe = _safe_name(query)
+    key = _cache_key(f"{query}\0{index}")
+    for suffix in (".jpg", ".png", ".webp"):
+        candidate = out / f"commons-{safe}-{key}{suffix}"
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate, _read_attribution(candidate)
+    # Backward compatibility with assets written before keyed caching was added.
+    for suffix in (".jpg", ".png", ".webp"):
+        candidate = out / f"commons-{safe}{suffix}"
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate, _read_attribution(candidate)
+    return None, {}
+
+
 def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tuple[Path | None, dict]:
-    """Pull a reusable raster image from Wikimedia Commons and save attribution metadata."""
+    """Pull a reusable raster image from Wikimedia Commons and cache it locally.
+
+    A rerender with the same semantic query should not repeat a network request or
+    silently swap the visual underneath an unchanged edit plan. Assets are keyed
+    by query + requested result index and keep their attribution beside the file.
+    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    cached, attribution = _existing_commons_asset(out, query, index)
+    if cached is not None:
+        return cached, attribution
+
     params = {
         "action": "query", "format": "json", "generator": "search",
         "gsrsearch": query, "gsrnamespace": "6", "gsrlimit": "8",
@@ -45,9 +84,10 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
                 candidates.append((page, info))
         if not candidates:
             return None, {}
-        page, info = candidates[min(index, len(candidates) - 1)]
+        page, info = candidates[min(max(0, int(index)), len(candidates) - 1)]
         suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(str(info.get("mime")), ".jpg")
-        path = out / f"commons-{_safe_name(query)}{suffix}"
+        key = _cache_key(f"{query}\0{index}")
+        path = out / f"commons-{_safe_name(query)}-{key}{suffix}"
         media = client.get(str(info["url"]))
         media.raise_for_status()
         path.write_bytes(media.content)
@@ -92,11 +132,14 @@ def _diffusion_pipeline(settings: Settings):
 
 def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings | None = None) -> Path:
     settings = settings or Settings()
-    pipeline = _diffusion_pipeline(settings)
-    image = pipeline(prompt, num_inference_steps=24).images[0]
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"generated-{_safe_name(prompt[:80])}.png"
+    identity = _cache_key(f"{settings.diffusion_model}\0{prompt}\0steps=24")
+    path = out / f"generated-{_safe_name(prompt[:80])}-{identity}.png"
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+    pipeline = _diffusion_pipeline(settings)
+    image = pipeline(prompt, num_inference_steps=24).images[0]
     image.save(path)
     return path
 
