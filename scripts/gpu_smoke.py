@@ -36,8 +36,6 @@ def main() -> int:
     if "A4000" not in gpu.upper():
         raise SystemExit(f"Expected an NVIDIA A4000 runner, got: {gpu}")
 
-    # faster-whisper executes through CTranslate2, so test the CUDA backend that
-    # Clipper actually uses rather than requiring PyTorch in the base install.
     try:
         import ctranslate2
     except Exception as exc:  # pragma: no cover - self-hosted GPU CI only
@@ -52,7 +50,8 @@ def main() -> int:
         raise SystemExit("FFmpeg does not expose h264_nvenc")
 
     with tempfile.TemporaryDirectory(prefix="clipper-gpu-smoke-") as tmp:
-        output = Path(tmp) / "nvenc-smoke.mp4"
+        root = Path(tmp)
+        output = root / "nvenc-smoke.mp4"
         run(
             [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -80,7 +79,25 @@ def main() -> int:
         if not all(value in probe for value in required):
             raise SystemExit("NVENC smoke output failed ffprobe validation")
 
-    print("A4000 CTranslate2 CUDA + NVENC smoke test passed.")
+        # Device-count checks can succeed even when CUDA runtime libraries needed
+        # for real inference are incomplete. Force one tiny faster-whisper model
+        # through the same CTranslate2 CUDA path Clipper uses in production.
+        audio = root / "whisper-smoke.wav"
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=16000",
+            "-t", "1.2", "-ac", "1", "-ar", "16000", str(audio),
+        ])
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel("tiny.en", device="cuda", compute_type="float16")
+            segments, info = model.transcribe(str(audio), beam_size=1, vad_filter=False)
+            list(segments)  # Force lazy CTranslate2 inference.
+            print(f"faster-whisper CUDA inference OK; language={getattr(info, 'language', 'unknown')}")
+        except Exception as exc:
+            raise SystemExit(f"Real faster-whisper CUDA inference failed: {exc}") from exc
+
+    print("A4000 faster-whisper CUDA + NVENC smoke test passed.")
     return 0
 
 
