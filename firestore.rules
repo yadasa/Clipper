@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function owns(data) { return signedIn() && data.userId == request.auth.uid; }
+
+    match /clipperJobs/{jobId} {
+      allow create: if owns(request.resource.data)
+                    && request.resource.data.status == 'queued'
+                    && request.resource.data.ratios is list;
+      allow read: if owns(resource.data);
+      // Job state is controlled by the trusted home worker through Admin SDK.
+      allow update, delete: if false;
+    }
+
+    match /clipperProjects/{projectId} {
+      allow read: if owns(resource.data);
+      allow write: if false;
+    }
+
+    match /clipperWorkers/{workerId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+  }
+}
