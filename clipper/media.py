@@ -79,7 +79,19 @@ def is_social_url(url: str) -> bool:
     return host in SOCIAL_HOSTS or any(host.endswith("." + item) for item in SOCIAL_HOSTS)
 
 
-def copy_local_source(source: str | Path, destination_dir: str | Path) -> Path:
+def copy_local_source(
+    source: str | Path,
+    destination_dir: str | Path,
+    *,
+    prefer_hardlink: bool = False,
+) -> Path:
+    """Persist a local source inside a project.
+
+    Normal creator files are copied so later edits cannot change an existing
+    project's source by modifying the original. Disposable API/Firebase staging
+    files may opt into a hard link: after the staging link is deleted, the project
+    keeps the same immutable bytes without a second multi-gigabyte copy.
+    """
     src = Path(source).expanduser().resolve()
     if not src.is_file():
         raise MediaError(f"Source file does not exist: {src}")
@@ -87,8 +99,18 @@ def copy_local_source(source: str | Path, destination_dir: str | Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower() or ".mp4"
     out = destination / f"source{suffix}"
-    if src != out.resolve():
-        shutil.copy2(src, out)
+    resolved_out = out.resolve()
+    if src == resolved_out:
+        return out
+
+    out.unlink(missing_ok=True)
+    if prefer_hardlink:
+        try:
+            os.link(src, out)
+            return out
+        except OSError:
+            pass
+    shutil.copy2(src, out)
     return out
 
 
@@ -142,8 +164,14 @@ def download_owned_social_source(
     return candidates[0]
 
 
-def ingest(source: str, destination_dir: str | Path, *, own_content_ack: bool = False) -> Path:
+def ingest(
+    source: str,
+    destination_dir: str | Path,
+    *,
+    own_content_ack: bool = False,
+    prefer_hardlink: bool = False,
+) -> Path:
     parsed = urlparse(source)
     if parsed.scheme.lower() in {"http", "https"}:
         return download_owned_social_source(source, destination_dir, own_content_ack=own_content_ack)
-    return copy_local_source(source, destination_dir)
+    return copy_local_source(source, destination_dir, prefer_hardlink=prefer_hardlink)
