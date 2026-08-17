@@ -193,7 +193,14 @@ def render_clip(
     audio_map: list[str] = []
     audio_codec: list[str] = []
     if music_index is not None and source_has_audio:
-        filters.extend(music_mix_filters(music_index))
+        filters.extend(
+            music_mix_filters(
+                music_index,
+                speech_words=transcript_words,
+                clip_start=candidate.start,
+                clip_duration=candidate.duration,
+            )
+        )
         audio_map = ["-map", "[aout]"]
         audio_codec = ["-c:a", "aac", "-b:a", "192k"]
     elif music_index is not None:
