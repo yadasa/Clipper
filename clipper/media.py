@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,17 +27,36 @@ def _run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedP
         return subprocess.run(cmd, check=True, text=True, capture_output=True, timeout=timeout)
     except FileNotFoundError as exc:
         raise MediaError(f"Required executable not found: {cmd[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"{cmd[0]} timed out after {timeout} seconds") from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise MediaError(detail[-3000:]) from exc
 
 
-def probe(path: str | Path) -> dict:
+@lru_cache(maxsize=256)
+def _probe_cached(path: str, size: int, mtime_ns: int) -> str:
+    """Cache ffprobe output while still invalidating files replaced in place."""
+    del size, mtime_ns
     result = _run([
         "ffprobe", "-v", "error", "-show_streams", "-show_format",
-        "-of", "json", str(path),
-    ])
-    return json.loads(result.stdout)
+        "-of", "json", path,
+    ], timeout=30)
+    return result.stdout
+
+
+def probe(path: str | Path) -> dict:
+    target = Path(path).expanduser().resolve()
+    try:
+        stat = target.stat()
+    except OSError as exc:
+        raise MediaError(f"Media file does not exist or cannot be read: {target}") from exc
+    try:
+        payload = _probe_cached(str(target), int(stat.st_size), int(stat.st_mtime_ns))
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise MediaError(f"ffprobe returned invalid JSON for {target}") from exc
+    return value if isinstance(value, dict) else {}
 
 
 def duration(path: str | Path) -> float:
@@ -52,7 +72,10 @@ def source_id(value: str) -> str:
 
 
 def is_social_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").rstrip(".").lower()
     return host in SOCIAL_HOSTS or any(host.endswith("." + item) for item in SOCIAL_HOSTS)
 
 
@@ -82,8 +105,15 @@ def download_owned_social_source(
     access; logged-in cookies can expose an original/cleaner asset when the
     platform makes one available to the owner.
     """
-    if is_social_url(url) and not own_content_ack:
-        raise MediaError("Social-link import requires confirmation that you own or are authorized to reuse the content.")
+    if not is_social_url(url):
+        raise MediaError(
+            "Remote ingest is limited to supported social hosts. "
+            "Use a local file for other media until licensed direct-URL ingest is enabled."
+        )
+    if not own_content_ack:
+        raise MediaError(
+            "Social-link import requires confirmation that you own or are authorized to reuse the content."
+        )
 
     out_dir = Path(destination_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +132,11 @@ def download_owned_social_source(
     cmd.append(url)
     _run(cmd, timeout=None)
 
-    candidates = sorted(out_dir.glob("source.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = sorted(
+        (path for path in out_dir.glob("source.*") if path.is_file() and not path.name.endswith(".part")),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
     if not candidates:
         raise MediaError("yt-dlp completed but no source file was produced")
     return candidates[0]
@@ -110,6 +144,6 @@ def download_owned_social_source(
 
 def ingest(source: str, destination_dir: str | Path, *, own_content_ack: bool = False) -> Path:
     parsed = urlparse(source)
-    if parsed.scheme in {"http", "https"}:
+    if parsed.scheme.lower() in {"http", "https"}:
         return download_owned_social_source(source, destination_dir, own_content_ack=own_content_ack)
     return copy_local_source(source, destination_dir)
