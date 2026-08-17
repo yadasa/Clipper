@@ -134,7 +134,7 @@ jobs:
           ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264
           ffmpeg -hide_banner -filters 2>/dev/null | grep -q subtitles
           ffmpeg -hide_banner -filters 2>/dev/null | grep -q loudnorm
-          ffmpeg -hide_banner -filters 2>/dev/null | grep -q sidechaincompress
+          ffmpeg -hide_banner -filters 2>/dev/null | grep -q volume
           ffmpeg -hide_banner -filters 2>/dev/null | grep -q amix
           ffprobe -version
 
