@@ -52,9 +52,17 @@ class ClipCandidate:
     reason: str = ""
     transcript: str = ""
     metrics: dict[str, float] = field(default_factory=dict)
+    # Optional chronological source ranges that should be stitched together.
+    # Empty means the traditional continuous start..end clip.
+    source_intervals: list[dict[str, float]] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
+        if self.source_intervals:
+            return sum(
+                max(0.0, float(item.get("end", 0)) - float(item.get("start", 0)))
+                for item in self.source_intervals
+            )
         return max(0.0, self.end - self.start)
 
 
@@ -108,6 +116,8 @@ class ProjectManifest:
     render_source_path: str | None = None
     transcript_path: str | None = None
     edit_plan_path: str | None = None
+    stage_report_path: str | None = None
+    automation_mode: str = "manual"
     hardware_profile: dict[str, Any] = field(default_factory=dict)
     clips: list[dict[str, Any]] = field(default_factory=list)
     status: str = "created"
