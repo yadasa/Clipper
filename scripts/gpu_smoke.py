@@ -1,21 +1,14 @@
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 
 def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(
-        cmd,
-        check=True,
-        text=True,
-        capture_output=capture,
-    )
+    return subprocess.run(cmd, check=True, text=True, capture_output=capture)
 
 
 def require_executable(name: str) -> str:
@@ -43,19 +36,16 @@ def main() -> int:
     if "A4000" not in gpu.upper():
         raise SystemExit(f"Expected an NVIDIA A4000 runner, got: {gpu}")
 
+    # faster-whisper executes through CTranslate2, so test the CUDA backend that
+    # Clipper actually uses rather than requiring PyTorch in the base install.
     try:
-        import torch
-    except Exception as exc:  # pragma: no cover - only runs on self-hosted GPU CI
-        raise SystemExit(f"PyTorch import failed: {exc}") from exc
-
-    if not torch.cuda.is_available():
-        raise SystemExit("torch.cuda.is_available() is false")
-
-    device_name = torch.cuda.get_device_name(0)
-    total_gib = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    print(f"CUDA device: {device_name} ({total_gib:.1f} GiB)")
-    if "A4000" not in device_name.upper():
-        raise SystemExit(f"PyTorch is not seeing the expected A4000: {device_name}")
+        import ctranslate2
+    except Exception as exc:  # pragma: no cover - self-hosted GPU CI only
+        raise SystemExit(f"CTranslate2 import failed: {exc}") from exc
+    cuda_devices = int(ctranslate2.get_cuda_device_count())
+    print(f"CTranslate2 CUDA device count: {cuda_devices}")
+    if cuda_devices < 1:
+        raise SystemExit("CTranslate2 cannot see a CUDA device")
 
     encoders = run(["ffmpeg", "-hide_banner", "-encoders"], capture=True).stdout
     if "h264_nvenc" not in encoders:
@@ -65,37 +55,13 @@ def main() -> int:
         output = Path(tmp) / "nvenc-smoke.mp4"
         run(
             [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=1280x720:rate=30",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:sample_rate=48000",
-                "-t",
-                "1",
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p4",
-                "-rc",
-                "vbr",
-                "-cq",
-                "25",
-                "-b:v",
-                "0",
-                "-c:a",
-                "aac",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-t", "1",
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+                "-cq", "25", "-b:v", "0",
+                "-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                 str(output),
             ]
         )
@@ -103,24 +69,18 @@ def main() -> int:
             raise SystemExit("NVENC smoke render did not produce a valid-looking file")
         probe = run(
             [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name,width,height",
-                "-of",
-                "default=noprint_wrappers=1",
-                str(output),
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height,pix_fmt",
+                "-of", "default=noprint_wrappers=1", str(output),
             ],
             capture=True,
         ).stdout
         print(probe)
-        if "codec_name=h264" not in probe or "width=1280" not in probe or "height=720" not in probe:
+        required = ("codec_name=h264", "width=1280", "height=720", "pix_fmt=yuv420p")
+        if not all(value in probe for value in required):
             raise SystemExit("NVENC smoke output failed ffprobe validation")
 
-    print("A4000 CUDA + NVENC smoke test passed.")
+    print("A4000 CTranslate2 CUDA + NVENC smoke test passed.")
     return 0
 
 
