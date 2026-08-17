@@ -20,6 +20,7 @@ const urlCache = new Map();
 function escapeHtml(value='') { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function timeValue(value) { try { return value?.toMillis?.() || new Date(value || 0).getTime() || 0; } catch { return 0; } }
 function selectedRatios() { return $$('input[name="ratio"]:checked').map(el => el.value); }
+function selectedPlatforms() { return $$('input[name="platform"]:checked').map(el => el.value); }
 function setMessage(text, error=false) { const el=$('#uploadMessage'); el.textContent=text; el.style.color=error?'#824d3d':''; }
 function setProgress(value) { const box=$('#uploadProgress'); box.classList.toggle('hidden', value == null); if(value!=null) box.firstElementChild.style.width=`${Math.max(0,Math.min(100,value))}%`; }
 function updateQueueButton() {
@@ -70,11 +71,14 @@ async function renderDoneProject(project) {
     }));
     blocks.push(`<div class="clip-block"><div class="clip-title"><strong>${escapeHtml(outputs[0]?.title || clipId)}</strong><span class="meta">${outputs.length} version${outputs.length===1?'':'s'}</span></div><div class="variants">${variants.join('')}</div></div>`);
   }
-  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(project.sourceName || 'Untitled source')}</h3><div class="meta">${project.clipCount || Object.keys(groups).length} clips · ${(project.ratios||[]).join(' · ')}</div></div><span class="job-status done">done</span></div><div class="clips">${blocks.join('') || '<div class="fine">No output files were returned.</div>'}</div></article>`;
+  const published=(project.publishPlatforms||[]).length ? `<div class="fine" style="margin-top:12px">Publish targets: ${escapeHtml((project.publishPlatforms||[]).join(' · '))}${(project.publishErrors||[]).length ? ` · ${project.publishErrors.length} publish issue${project.publishErrors.length===1?'':'s'}` : ' · submitted'}</div>` : '';
+  const errors=(project.publishErrors||[]).length ? `<details class="extras"><summary>Publishing issues</summary><p class="fine">${(project.publishErrors||[]).map(escapeHtml).join('<br>')}</p></details>` : '';
+  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(project.sourceName || 'Untitled source')}</h3><div class="meta">${project.clipCount || Object.keys(groups).length} clips · ${(project.ratios||[]).join(' · ')}</div></div><span class="job-status done">done</span></div>${published}${errors}<div class="clips">${blocks.join('') || '<div class="fine">No output files were returned.</div>'}</div></article>`;
 }
 function renderJob(job) {
   const message = job.lastError ? `<div class="fine" style="margin-top:10px">${escapeHtml(job.lastError)}</div>` : '';
-  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(job.sourceName || job.sourceUrl || 'Queued source')}</h3><div class="meta">${(job.ratios||[]).join(' · ')}${job.secondaryStoragePaths?.length ? ` · ${job.secondaryStoragePaths.length+1} cameras` : ''}${job.externalAudioStoragePath ? ' · separate mic' : ''}</div></div><span class="job-status ${escapeHtml(job.status)}">${escapeHtml(job.status || 'queued')}</span></div>${message}</article>`;
+  const publish = job.publishPlatforms?.length ? ` · publish ${job.publishPlatforms.join(', ')}` : '';
+  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(job.sourceName || job.sourceUrl || 'Queued source')}</h3><div class="meta">${(job.ratios||[]).join(' · ')}${job.secondaryStoragePaths?.length ? ` · ${job.secondaryStoragePaths.length+1} cameras` : ''}${job.externalAudioStoragePath ? ' · separate mic' : ''}${escapeHtml(publish)}</div></div><span class="job-status ${escapeHtml(job.status)}">${escapeHtml(job.status || 'queued')}</span></div>${message}</article>`;
 }
 
 async function loadProjects() {
@@ -101,7 +105,7 @@ async function loadProjects() {
     }
     const now=Date.now();
     const workers=workerSnap.docs.map(s=>s.data()).filter(w=>now-timeValue(w.lastSeenAt)<150000 && w.state!=='offline');
-    const active=workers.find(w=>w.state==='processing'||w.state==='uploading') || workers[0];
+    const active=workers.find(w=>['processing','uploading','publishing'].includes(w.state)) || workers[0];
     $('#workerState').textContent = active ? `Home desktop ${active.state}` : 'Home desktop offline';
     $('#workerState').className=`status-pill ${active?'live':'muted'}`;
   } catch (error) {
@@ -128,7 +132,16 @@ async function queueJob() {
   const allUploads=[...(primaryFile?[primaryFile]:[]),...secondaryFiles,...(externalAudio?[externalAudio]:[])];
   const totalBytes=allUploads.reduce((sum,file)=>sum+file.size,0);
   let sent=0;
-  const base={userId:currentUser.uid,status:'queued',ratios,alternateVisualLayouts:$('#alternateLayouts').checked,createdAt:serverTimestamp(),updatedAt:serverTimestamp()};
+  const base={
+    userId:currentUser.uid,
+    status:'queued',
+    ratios,
+    alternateVisualLayouts:$('#alternateLayouts').checked,
+    publishPlatforms:selectedPlatforms(),
+    publishDescription:$('#publishDescription').value.trim(),
+    createdAt:serverTimestamp(),
+    updatedAt:serverTimestamp()
+  };
   $('#queueButton').disabled=true; setMessage('Preparing job…'); setProgress(totalBytes?0:null);
   try {
     const extras={secondaryStoragePaths:[]};
