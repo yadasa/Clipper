@@ -88,7 +88,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip check
 
-      - name: Import core runtime modules
+      - name: Import core runtime modules and FastAPI routes
         run: |
           python - <<'PY'
           import fastapi
@@ -123,7 +123,10 @@ jobs:
           import clipper.transcript_io
           import clipper.transcription
           import clipper.visuals
-          print('Core imports OK')
+          import api
+          assert any(route.path == '/api/process' for route in api.app.routes)
+          assert any('/rerender' in route.path for route in api.app.routes)
+          print('Core imports and API routes OK')
           PY
 
       - name: Verify required FFmpeg features
@@ -151,7 +154,7 @@ jobs:
           grep -q 'height=360' /tmp/probe.txt
           grep -q 'pix_fmt=yuv420p' /tmp/probe.txt
 
-      - name: Exercise smart cuts, punch-ins, captions, hooks, branding, and music
+      - name: Exercise smart cuts, punch-ins, captions, hooks, branding, music, and silent-video fallbacks
         run: python scripts/ffmpeg_feature_smoke.py
 
   a4000-gpu-smoke:
