@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 import subprocess
 from pathlib import Path
@@ -69,8 +68,8 @@ def _norm_word(value: str) -> str:
 
 
 def transcript_anchors(primary: Transcript, secondary: Transcript, ngram: int = 5) -> list[tuple[float, float]]:
-    p = [(w.start, _norm_word(w.text)) for w in primary.words if _norm_word(w.text)]
-    s = [(w.start, _norm_word(w.text)) for w in secondary.words if _norm_word(w.text)]
+    p = [(word.start, _norm_word(word.text)) for word in primary.words if _norm_word(word.text)]
+    s = [(word.start, _norm_word(word.text)) for word in secondary.words if _norm_word(word.text)]
     if len(p) < ngram or len(s) < ngram:
         return []
     index: dict[tuple[str, ...], list[float]] = {}
@@ -95,8 +94,8 @@ def fit_transcript_sync(primary: Transcript, secondary: Transcript, secondary_na
     anchors = transcript_anchors(primary, secondary)
     if len(anchors) < 2:
         return None
-    x = np.array([a[0] for a in anchors], dtype=float)
-    y = np.array([a[1] for a in anchors], dtype=float)
+    x = np.array([anchor[0] for anchor in anchors], dtype=float)
+    y = np.array([anchor[1] for anchor in anchors], dtype=float)
 
     # Robust two-stage fit: least squares, remove large residual outliers, refit.
     slope, intercept = np.polyfit(x, y, 1)
