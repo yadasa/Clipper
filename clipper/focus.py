@@ -9,6 +9,7 @@ from pathlib import Path
 _cache_lock = threading.Lock()
 _CACHE_LIMIT = 64
 _cache: OrderedDict[tuple[str, int, int, float, float, float, int], list[tuple[float, float]]] = OrderedDict()
+_inflight: dict[tuple[str, int, int, float, float, float, int], threading.Event] = {}
 
 
 def _video_size(source_path: str | Path) -> tuple[int, int]:
@@ -85,27 +86,46 @@ def _cache_put(key, points: list[tuple[float, float]]) -> None:
             _cache.popitem(last=False)
 
 
-def track_face_centers(
+def _claim_analysis(key):
+    """Return (event, leader) for one source/timeline analysis key."""
+    if key is None:
+        return None, True
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            _cache.move_to_end(key)
+            return None, False
+        event = _inflight.get(key)
+        if event is None:
+            event = threading.Event()
+            _inflight[key] = event
+            return event, True
+        return event, False
+
+
+def _finish_analysis(key, event: threading.Event | None, points: list[tuple[float, float]]) -> None:
+    if key is None:
+        return
+    with _cache_lock:
+        _cache[key] = list(points)
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_LIMIT:
+            _cache.popitem(last=False)
+        current = _inflight.pop(key, None)
+        if current is not None:
+            current.set()
+        elif event is not None:
+            event.set()
+
+
+def _analyze_face_centers(
     source_path: str | Path,
     start: float,
     end: float,
     *,
-    sample_hz: float = 5.0,
-    analysis_width: int = 480,
+    sample_hz: float,
+    analysis_width: int,
 ) -> list[tuple[float, float]]:
-    """Return (clip-local seconds, normalized x) for the dominant face.
-
-    FFmpeg seeks once, samples only a few frames per second, and downscales before
-    pixels cross into Python. This avoids repeated random seeks and avoids a
-    full-resolution/full-frame-rate OpenCV decode. A sticky nearest-target rule
-    plus exponential smoothing keeps background faces from making the crop whip.
-    Failure is intentionally soft so callers can fall back to a center crop.
-    """
-    key = _cache_key(source_path, start, end, sample_hz, analysis_width)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
     try:
         import mediapipe as mp
         import numpy as np
@@ -189,8 +209,53 @@ def track_face_centers(
     for t, x in points:
         if not compact or abs(x - compact[-1][1]) >= 0.008 or t - compact[-1][0] >= 1.0:
             compact.append((t, x))
-    _cache_put(key, compact)
     return compact
+
+
+def track_face_centers(
+    source_path: str | Path,
+    start: float,
+    end: float,
+    *,
+    sample_hz: float = 5.0,
+    analysis_width: int = 480,
+) -> list[tuple[float, float]]:
+    """Return (clip-local seconds, normalized x) for the dominant face.
+
+    FFmpeg seeks once, samples only a few frames per second, and downscales before
+    pixels cross into Python. Analysis is cached and single-flight: parallel output
+    renders for the same source/timeline wait for one shared MediaPipe pass instead
+    of decoding/analyzing the same frames twice. Failure is intentionally soft so
+    callers can fall back to a center crop.
+    """
+    key = _cache_key(source_path, start, end, sample_hz, analysis_width)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    event, leader = _claim_analysis(key)
+    if not leader:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        if event is not None:
+            event.wait(timeout=180)
+            cached = _cache_get(key)
+            return cached if cached is not None else []
+        return []
+
+    points: list[tuple[float, float]] = []
+    try:
+        points = _analyze_face_centers(
+            source_path,
+            start,
+            end,
+            sample_hz=sample_hz,
+            analysis_width=analysis_width,
+        )
+        return points
+    finally:
+        _finish_analysis(key, event, points)
 
 
 def crop_geometry(source_width: int, source_height: int, target_width: int, target_height: int) -> tuple[int, int]:
