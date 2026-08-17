@@ -1,10 +1,12 @@
 from pathlib import Path
 
 from clipper.automation import auto_edit_profile, transcript_from_words
+from clipper.brand import BrandKit
 from clipper.coherence import select_auto_clips
 from clipper.config import Settings
 from clipper.edit_plan import candidate_from_plan, generate_edit_plan, validate_edit_plan
 from clipper.models import ClipCandidate, Transcript, Word
+from clipper.pipeline import _prepare_candidate
 from clipper.quality import check_render
 
 
@@ -60,11 +62,52 @@ def test_edit_plan_round_trips_stitched_source_ranges(tmp_path: Path):
         transcript="one idea then the related payoff",
         source_intervals=[{"start": 1.0, "end": 5.0}, {"start": 10.0, "end": 15.0}],
     )
-    plan = generate_edit_plan("project", [candidate], ["9:16"], __import__("clipper.brand", fromlist=["BrandKit"]).BrandKit())
+    plan = generate_edit_plan("project", [candidate], ["9:16"], BrandKit())
     clean = validate_edit_plan(plan)
     rebuilt = candidate_from_plan(clean["clips"][0])
     assert rebuilt.source_intervals == candidate.source_intervals
     assert rebuilt.duration == 9.0
+
+
+def test_stitched_candidate_is_precomped_in_source_order(tmp_path: Path, monkeypatch):
+    import clipper.pipeline as pipeline_module
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"placeholder-video-content" * 100)
+    candidate = ClipCandidate(
+        "story",
+        1.0,
+        15.0,
+        88,
+        "Story",
+        transcript="setup payoff",
+        source_intervals=[{"start": 1.0, "end": 5.0}, {"start": 10.0, "end": 15.0}],
+    )
+    words = [Word("setup", 2.0, 2.5), Word("payoff", 11.0, 11.5)]
+    captured = {}
+
+    def fake_prepare(_source, intervals, output):
+        captured["intervals"] = [(item.start, item.end) for item in intervals]
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_bytes(b"prepared" * 2000)
+        return Path(output)
+
+    monkeypatch.setattr(pipeline_module, "prepare_compacted_clip", fake_prepare)
+    prepared, local, mapped, intervals, punches = _prepare_candidate(
+        source,
+        candidate,
+        words,
+        {"smart_cut": False, "remove_fillers": False, "punch_ins": False},
+        tmp_path / "project",
+    )
+    assert prepared.is_file()
+    assert captured["intervals"] == [(1.0, 5.0), (10.0, 15.0)]
+    assert intervals == [{"start": 1.0, "end": 5.0}, {"start": 10.0, "end": 15.0}]
+    assert local.duration == 9.0
+    assert [word.text for word in mapped] == ["setup", "payoff"]
+    assert mapped[0].start == 1.0
+    assert mapped[1].start == 5.0
+    assert punches == []
 
 
 def test_auto_edit_profile_reduces_visual_noise_for_fast_delivery(tmp_path: Path):
