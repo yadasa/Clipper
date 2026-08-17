@@ -8,7 +8,7 @@ from clipper.brand import BrandKit
 from clipper.models import ClipCandidate, Word
 from clipper.motion import PunchIn, apply_punch_ins
 from clipper.render import render_clip
-from clipper.smartcut import build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
+from clipper.smartcut import KeepInterval, build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
 
 
 def run(cmd: list[str]) -> None:
@@ -16,10 +16,33 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+def assert_video(path: Path, *, width: int | None = None, height: int | None = None) -> None:
+    if not path.is_file() or path.stat().st_size < 5_000:
+        raise SystemExit(f"Expected rendered video is missing or too small: {path}")
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height,pix_fmt",
+            "-of", "default=noprint_wrappers=1", str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    print(probe)
+    assert "codec_name=h264" in probe
+    assert "pix_fmt=yuv420p" in probe
+    if width is not None:
+        assert f"width={width}" in probe
+    if height is not None:
+        assert f"height={height}" in probe
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="clipper-feature-smoke-") as tmp:
         root = Path(tmp)
         source = root / "source.mp4"
+        silent_source = root / "silent-source.mp4"
         music = root / "music.m4a"
         logo = root / "logo.png"
         run([
@@ -28,6 +51,12 @@ def main() -> int:
             "-f", "lavfi", "-i", "sine=frequency=520:sample_rate=48000",
             "-t", "3.2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-c:a", "aac", "-pix_fmt", "yuv420p", str(source),
+        ])
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=480x270:rate=24",
+            "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+            "-pix_fmt", "yuv420p", "-an", str(silent_source),
         ])
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -77,23 +106,21 @@ def main() -> int:
             hook_text="SMOKE TEST HOOK",
             music_path=str(music),
         )
-        if not output.is_file() or output.stat().st_size < 20_000:
-            raise SystemExit("Feature smoke output is missing or too small")
-        probe = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height,pix_fmt",
-                "-of", "default=noprint_wrappers=1", str(output),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        print(probe)
-        assert "codec_name=h264" in probe
-        assert "width=1080" in probe
-        assert "height=1920" in probe
-        assert "pix_fmt=yuv420p" in probe
+        assert_video(output, width=1080, height=1920)
+
+        # Break the usual creator-video assumption by using a source with no audio.
+        # Smart cuts and punch-ins must still work instead of referring to [0:a].
+        silent_cut = root / "silent-cut.mp4"
+        prepare_compacted_clip(
+            silent_source,
+            [KeepInterval(0.0, 0.65), KeepInterval(1.0, 1.8)],
+            silent_cut,
+        )
+        assert_video(silent_cut, width=480, height=270)
+        silent_motion = root / "silent-motion.mp4"
+        apply_punch_ins(silent_cut, [PunchIn(0.2, 0.8, 1.08)], silent_motion)
+        assert_video(silent_motion, width=480, height=270)
+
         print("Clipper FFmpeg feature smoke passed.")
     return 0
 
