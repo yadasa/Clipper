@@ -7,7 +7,6 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from difflib import SequenceMatcher
-from functools import lru_cache
 from pathlib import Path
 
 from ffmpeg_utils import DELIVERY, METADATA_SCRUB, audio_encode_args, video_encode_args
@@ -30,8 +29,7 @@ def _escape_filter_path(path: str | Path) -> str:
     return value
 
 
-@lru_cache(maxsize=32)
-def _source_dimensions(path: str) -> tuple[int, int]:
+def _source_dimensions(path: str | Path) -> tuple[int, int]:
     try:
         info = probe(path)
         for stream in info.get("streams", []):
@@ -52,7 +50,7 @@ def _base_filter(
     height: int,
     work_path: Path,
 ) -> str:
-    source_w, source_h = _source_dimensions(str(Path(source_path).resolve()))
+    source_w, source_h = _source_dimensions(source_path)
     if source_w <= 0 or source_h <= 0:
         return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
 
@@ -256,6 +254,7 @@ def render_clip(
     caption_preset: str | None = None,
     hook_text: str | None = None,
     music_path: str | None = None,
+    cues_aligned: bool = False,
 ) -> RenderedVariant:
     if ratio not in ASPECT_PRESETS:
         raise ValueError(f"Unsupported aspect ratio: {ratio}")
@@ -275,7 +274,7 @@ def render_clip(
         hook_text=hook_text,
     )
 
-    aligned_cues = align_visual_cues(cues, transcript_words, candidate)
+    aligned_cues = list(cues) if cues_aligned else align_visual_cues(cues, transcript_words, candidate)
     usable = [
         cue
         for cue in aligned_cues
@@ -411,6 +410,7 @@ def render_variants(
     caption_preset: str | None = None,
     hook_text: str | None = None,
     music_path: str | None = None,
+    cues_aligned: bool = False,
 ) -> list[RenderedVariant]:
     modes = layout_modes or ["auto"]
     specs: list[tuple[str, str, Path]] = []
@@ -421,10 +421,7 @@ def render_variants(
             path = Path(output_root) / candidate.id / ratio_dir / f"{candidate.id}-{ratio_dir}{suffix}.mp4"
             specs.append((ratio, mode, path))
 
-    aligned_cues = align_visual_cues(cues, transcript_words, candidate)
-    for original, aligned in zip(cues, aligned_cues):
-        original.start = aligned.start
-        original.end = aligned.end
+    aligned_cues = list(cues) if cues_aligned else align_visual_cues(cues, transcript_words, candidate)
 
     workers = max(1, int(os.getenv("RENDER_WORKERS", "2")))
     workers = min(workers, len(specs)) if specs else 1
@@ -443,6 +440,7 @@ def render_variants(
             caption_preset=caption_preset,
             hook_text=hook_text,
             music_path=music_path,
+            cues_aligned=True,
         )
 
     if workers == 1:
