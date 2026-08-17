@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -103,7 +105,8 @@ class FirebaseBridge:
                 lease = data.get("leaseExpiresAt")
                 if lease and lease < now:
                     snapshot.reference.update({
-                        "status": "queued", "workerId": None,
+                        "status": "queued",
+                        "workerId": None,
                         "updatedAt": self.firestore.SERVER_TIMESTAMP,
                         "lastError": "Worker lease expired; job returned to queue",
                     })
@@ -128,7 +131,7 @@ class FirebaseBridge:
 
     def _download_blob(self, job: dict, storage_path: str, local_group: str, index: int = 0) -> Path:
         safe_path = self._validated_storage_path(job, storage_path)
-        suffix = Path(safe_path).suffix or ".mp4"
+        suffix = Path(safe_path).suffix or ".bin"
         local = self.settings.workdir / "firebase_inbox" / job["id"] / local_group / f"input_{index}{suffix}"
         local.parent.mkdir(parents=True, exist_ok=True)
         self.bucket.blob(safe_path).download_to_filename(str(local))
@@ -145,13 +148,45 @@ class FirebaseBridge:
             return source_url
         raise RuntimeError("Firebase job has neither sourceStoragePath nor sourceUrl")
 
-    def _download_extras(self, job: dict) -> tuple[list[str], str | None]:
+    def _download_extras(self, job: dict) -> tuple[list[str], str | None, str | None, str | None]:
         cameras = []
         for index, storage_path in enumerate(job.get("secondaryStoragePaths") or []):
             cameras.append(str(self._download_blob(job, str(storage_path), "cameras", index)))
         audio_path = job.get("externalAudioStoragePath")
         audio = str(self._download_blob(job, str(audio_path), "external_audio")) if audio_path else None
-        return cameras, audio
+        music_path = job.get("musicStoragePath")
+        music = str(self._download_blob(job, str(music_path), "music")) if music_path else None
+        logo_path = job.get("logoStoragePath")
+        logo = str(self._download_blob(job, str(logo_path), "brand")) if logo_path else None
+        return cameras, audio, music, logo
+
+    def _settings_for_job(self, job: dict, music: str | None, logo: str | None) -> Settings:
+        settings = replace(self.settings)
+        if "smartCut" in job:
+            settings.smart_cut = bool(job.get("smartCut"))
+        if "removeFillers" in job:
+            settings.remove_fillers = bool(job.get("removeFillers"))
+        if "punchIns" in job:
+            settings.punch_ins = bool(job.get("punchIns"))
+        if "hookOverlay" in job:
+            settings.hook_overlay = bool(job.get("hookOverlay"))
+        preset = str(job.get("captionPreset") or settings.caption_preset)
+        if preset in {"karaoke", "clean", "minimal"}:
+            settings.caption_preset = preset
+        if music:
+            settings.music_path = music
+
+        brand_data = dict(job.get("brand") or {})
+        if settings.caption_preset:
+            brand_data["caption_preset"] = settings.caption_preset
+        if logo:
+            brand_data["logo_path"] = logo
+        if brand_data:
+            brand_path = self.settings.workdir / "firebase_inbox" / job["id"] / "brand" / "brand.json"
+            brand_path.parent.mkdir(parents=True, exist_ok=True)
+            brand_path.write_text(json.dumps(brand_data, indent=2), encoding="utf-8")
+            settings.brand_kit_path = str(brand_path)
+        return settings
 
     def _upload_outputs(self, job: dict, manifest) -> list[dict]:
         user_id = str(job.get("userId") or "")
@@ -161,32 +196,47 @@ class FirebaseBridge:
         outputs: list[dict] = []
         for clip in manifest.clips:
             candidate = clip.get("candidate", {})
+            metadata = clip.get("social_metadata") or {}
             for variant in clip.get("variants", []):
                 local = Path(variant["path"])
                 if not local.is_file():
                     continue
                 ratio = str(variant.get("aspect_ratio") or "unknown")
                 clip_id = str(variant.get("clip_id") or candidate.get("id") or "clip")
-                remote = f"users/{user_id}/projects/{job_id}/clips/{clip_id}/{ratio.replace(':', 'x')}/{local.name}"
+                remote_dir = f"users/{user_id}/projects/{job_id}/clips/{clip_id}/{ratio.replace(':', 'x')}"
+                remote = f"{remote_dir}/{local.name}"
                 self.bucket.blob(remote).upload_from_filename(str(local), content_type="video/mp4", timeout=600)
+                thumb_remote = None
+                thumbnail_path = variant.get("thumbnail_path")
+                if thumbnail_path and Path(thumbnail_path).is_file():
+                    thumb = Path(thumbnail_path)
+                    thumb_remote = f"{remote_dir}/{thumb.name}"
+                    self.bucket.blob(thumb_remote).upload_from_filename(str(thumb), content_type="image/jpeg", timeout=120)
                 outputs.append({
                     "clipId": clip_id,
                     "aspectRatio": ratio,
+                    "layoutMode": variant.get("layout_mode", "auto"),
                     "storagePath": remote,
+                    "thumbnailStoragePath": thumb_remote,
                     "filename": local.name,
                     "width": variant.get("width"),
                     "height": variant.get("height"),
-                    "title": candidate.get("title"),
+                    "title": metadata.get("title") or candidate.get("title"),
                     "score": candidate.get("score"),
+                    "metrics": candidate.get("metrics") or {},
+                    "socialMetadata": metadata,
                 })
         return outputs
 
-    def _publish_outputs(self, job: dict, manifest) -> tuple[list[dict], list[str]]:
-        """Publish only when the user explicitly selected platforms for this job.
+    def _upload_edit_plan(self, job: dict, manifest) -> str | None:
+        if not manifest.edit_plan_path or not Path(manifest.edit_plan_path).is_file():
+            return None
+        user_id = str(job.get("userId") or "")
+        remote = f"users/{user_id}/projects/{job['id']}/edit_plan.json"
+        self.bucket.blob(remote).upload_from_filename(manifest.edit_plan_path, content_type="application/json", timeout=120)
+        return remote
 
-        Publishing failure never destroys a completed edit. Results and errors are
-        returned separately and stored with the project for review/retry.
-        """
+    def _publish_outputs(self, job: dict, manifest) -> tuple[list[dict], list[str]]:
         platforms = []
         for value in job.get("publishPlatforms") or []:
             name = str(value).strip().lower()
@@ -202,9 +252,10 @@ class FirebaseBridge:
 
         results: list[dict] = []
         errors: list[str] = []
-        description = str(job.get("publishDescription") or "")
+        manual_description = str(job.get("publishDescription") or "").strip()
         for clip in manifest.clips:
             candidate = clip.get("candidate", {})
+            metadata = clip.get("social_metadata") or {}
             variants = clip.get("variants", [])
             by_ratio: dict[str, list[str]] = {}
             for platform in platforms:
@@ -218,10 +269,16 @@ class FirebaseBridge:
                     errors.append(f"{candidate.get('id', 'clip')}: no rendered file available for {', '.join(group)}")
                     continue
                 try:
+                    platform_meta = metadata.get("platforms") or {}
+                    description = manual_description or metadata.get("caption", "")
+                    if len(group) == 1:
+                        per_platform = platform_meta.get(group[0]) or {}
+                        description = manual_description or per_platform.get("caption") or per_platform.get("description") or description
                     response = publisher.upload_video(
-                        variant["path"], group,
-                        title=str(candidate.get("title") or ""),
-                        description=description,
+                        variant["path"],
+                        group,
+                        title=str(metadata.get("title") or candidate.get("title") or ""),
+                        description=str(description or ""),
                         add_to_queue=bool(job.get("publishQueue", False)),
                     )
                     results.append({
@@ -244,12 +301,13 @@ class FirebaseBridge:
         try:
             ref.update({"status": "processing", "updatedAt": self.firestore.SERVER_TIMESTAMP})
             source = self._source_value(job)
-            cameras, external_audio = self._download_extras(job)
+            cameras, external_audio, music, logo = self._download_extras(job)
+            job_settings = self._settings_for_job(job, music, logo)
             manifest = process_video(
                 source,
                 ratios=list(job.get("ratios") or ["9:16"]),
                 own_content_ack=bool(job.get("ownContentAck", False)),
-                settings=self.settings,
+                settings=job_settings,
                 secondary_cameras=cameras,
                 external_audio=external_audio,
                 alternate_visual_layouts=bool(job.get("alternateVisualLayouts", False)),
@@ -257,6 +315,7 @@ class FirebaseBridge:
             ref.update({"status": "uploading", "updatedAt": self.firestore.SERVER_TIMESTAMP})
             self._worker_state("uploading", job_id)
             outputs = self._upload_outputs(job, manifest)
+            edit_plan_storage_path = self._upload_edit_plan(job, manifest)
 
             publish_results: list[dict] = []
             publish_errors: list[str] = []
@@ -265,6 +324,16 @@ class FirebaseBridge:
                 self._worker_state("publishing", job_id)
                 publish_results, publish_errors = self._publish_outputs(job, manifest)
 
+            clip_metadata = {
+                str((clip.get("candidate") or {}).get("id") or index): {
+                    "candidate": clip.get("candidate"),
+                    "hookText": clip.get("hook_text"),
+                    "socialMetadata": clip.get("social_metadata"),
+                    "smartCutIntervals": clip.get("smart_cut_intervals"),
+                    "punchIns": clip.get("punch_ins"),
+                }
+                for index, clip in enumerate(manifest.clips)
+            }
             project = {
                 "userId": job.get("userId"),
                 "jobId": job_id,
@@ -273,6 +342,9 @@ class FirebaseBridge:
                 "sourceUrl": job.get("sourceUrl"),
                 "ratios": list(job.get("ratios") or ["9:16"]),
                 "outputs": outputs,
+                "clipMetadata": clip_metadata,
+                "editPlanStoragePath": edit_plan_storage_path,
+                "hardwareProfile": manifest.hardware_profile,
                 "clipCount": len(manifest.clips),
                 "status": "done",
                 "publishPlatforms": list(job.get("publishPlatforms") or []),
@@ -283,7 +355,9 @@ class FirebaseBridge:
             }
             self.db.collection("clipperProjects").document(job_id).set(project)
             ref.update({
-                "status": "done", "outputs": outputs,
+                "status": "done",
+                "outputs": outputs,
+                "editPlanStoragePath": edit_plan_storage_path,
                 "publishResults": publish_results,
                 "publishErrors": publish_errors,
                 "completedAt": self.firestore.SERVER_TIMESTAMP,
@@ -291,7 +365,8 @@ class FirebaseBridge:
             })
         except Exception as exc:
             ref.update({
-                "status": "failed", "lastError": str(exc)[:4000],
+                "status": "failed",
+                "lastError": str(exc)[:4000],
                 "updatedAt": self.firestore.SERVER_TIMESTAMP,
             })
             raise
