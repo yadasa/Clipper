@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 from ffmpeg_utils import DELIVERY, METADATA_SCRUB, audio_encode_args, video_encode_args
 
 from .config import ASPECT_PRESETS
+from .focus import crop_geometry, track_face_centers, write_sendcmd
+from .media import probe
 from .models import ClipCandidate, RenderedVariant, VisualCue, Word
 
 
@@ -62,8 +65,56 @@ def _escape_filter_path(path: str | Path) -> str:
     return value
 
 
-def _base_filter(width: int, height: int) -> str:
-    return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+@lru_cache(maxsize=32)
+def _source_dimensions(path: str) -> tuple[int, int]:
+    try:
+        info = probe(path)
+        for stream in info.get("streams", []):
+            if stream.get("codec_type") == "video":
+                width = int(stream.get("width") or 0)
+                height = int(stream.get("height") or 0)
+                if width > 0 and height > 0:
+                    return width, height
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _base_filter(
+    source_path: str | Path,
+    candidate: ClipCandidate,
+    width: int,
+    height: int,
+    work_path: Path,
+) -> str:
+    """Build a subject-aware crop when possible, center-cropping as a safe fallback.
+
+    Face analysis is low-resolution and cached per source clip, so rendering four
+    aspect/layout variants does not repeat detector work. FFmpeg performs the
+    actual full-resolution crop and scale natively.
+    """
+    source_w, source_h = _source_dimensions(str(Path(source_path).resolve()))
+    if source_w <= 0 or source_h <= 0:
+        return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
+
+    crop_w, crop_h = crop_geometry(source_w, source_h, width, height)
+    center = f"crop@focus=w={crop_w}:h={crop_h}:x=(iw-ow)/2:y=(ih-oh)/2,scale={width}:{height},setsar=1"
+
+    # Horizontal movement matters when the target format is narrower than the
+    # source (the dominant 16:9 -> 9:16 creator workflow). If there is no useful
+    # horizontal crop, skip detection entirely.
+    if crop_w >= source_w - 2:
+        return center
+
+    try:
+        points = track_face_centers(source_path, candidate.start, candidate.end)
+        cmd_path = write_sendcmd(points, source_w, crop_w, work_path.with_suffix(".focus.cmd"))
+        if cmd_path:
+            escaped = _escape_filter_path(cmd_path)
+            return f"sendcmd=f='{escaped}',{center}"
+    except Exception:
+        pass
+    return center
 
 
 def _mode_for(cue: VisualCue, ratio: str, index: int, requested: str) -> str:
@@ -105,7 +156,8 @@ def render_clip(
     for cue in usable:
         cmd += ["-loop", "1", "-framerate", "30", "-i", str(cue.asset_path)]
 
-    filters = [f"[0:v]{_base_filter(width, height)},setsar=1[base0]"]
+    base_filter = _base_filter(source_path, candidate, width, height, out)
+    filters = [f"[0:v]{base_filter}[base0]"]
     previous = "base0"
     for i, cue in enumerate(usable, 1):
         mode = _mode_for(cue, ratio, i - 1, layout_mode)
