@@ -82,6 +82,22 @@ class Settings:
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model: str = _str_env("GEMINI_MODEL", "gemini-2.5-flash")
 
+    # First-class editing mode. Auto is intentionally the default creator flow;
+    # manual keeps the older direct transcribe -> select -> per-clip cleanup path.
+    automation_mode: str = _str_env("AUTOMATION_MODE", "auto").lower()
+    auto_global_cleanup: bool = _bool_env("AUTO_GLOBAL_CLEANUP", True)
+    auto_story_stitch: bool = _bool_env("AUTO_STORY_STITCH", True)
+    auto_visual_intensity: bool = _bool_env("AUTO_VISUAL_INTENSITY", True)
+    auto_quality_gate: bool = _bool_env("AUTO_QUALITY_GATE", True)
+    auto_sync_refine_confidence: float = _float_env(
+        "AUTO_SYNC_REFINE_CONFIDENCE", 0.24, minimum=0.0, maximum=1.0
+    )
+    auto_cleanup_max_removed_ratio: float = _float_env(
+        "AUTO_CLEANUP_MAX_REMOVED_RATIO", 0.58, minimum=0.05, maximum=0.85
+    )
+    auto_min_clip_seconds: int = _int_env("AUTO_MIN_CLIP_SECONDS", 15, minimum=6)
+    auto_max_clip_seconds: int = _int_env("AUTO_MAX_CLIP_SECONDS", 55, minimum=12)
+
     # B-roll. VISUAL_PROVIDER remains as a compatibility/coarse switch while
     # BROLL_PROVIDERS controls the ordered resolver waterfall.
     visual_provider: str = _str_env("VISUAL_PROVIDER", "auto").lower()
@@ -118,6 +134,10 @@ class Settings:
         self.workdir.mkdir(parents=True, exist_ok=True)
         (self.workdir / "projects").mkdir(exist_ok=True)
         (self.workdir / "cache").mkdir(exist_ok=True)
+
+    @property
+    def auto_mode(self) -> bool:
+        return self.automation_mode.strip().lower() == "auto"
 
     def apply_hardware_profile(self):
         if not self.auto_hardware_profile:
