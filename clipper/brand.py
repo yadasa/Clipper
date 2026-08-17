@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_PRESETS = {"karaoke", "clean", "minimal"}
 
 
 @dataclass(slots=True)
@@ -41,7 +43,7 @@ def normalize_brand(data: dict | None) -> BrandKit:
         logo_position=str(data.get("logo_position") or "top-right"),
         hook_box=bool(data.get("hook_box", True)),
     )
-    if kit.caption_preset not in {"karaoke", "clean", "minimal"}:
+    if kit.caption_preset not in _PRESETS:
         kit.caption_preset = "karaoke"
     if kit.logo_position not in {"top-left", "top-right", "bottom-left", "bottom-right"}:
         kit.logo_position = "top-right"
@@ -52,7 +54,8 @@ def normalize_brand(data: dict | None) -> BrandKit:
 
 def load_brand(path: str | Path | None) -> BrandKit:
     if not path:
-        return BrandKit()
+        preset = os.getenv("CAPTION_PRESET", "karaoke").strip().lower()
+        return BrandKit(caption_preset=preset if preset in _PRESETS else "karaoke")
     p = Path(path).expanduser()
     if not p.is_file():
         raise FileNotFoundError(f"Brand kit not found: {p}")
