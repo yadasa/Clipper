@@ -26,11 +26,19 @@ function escapeHtml(value='') { return String(value).replace(/[&<>'"]/g, c => ({
 function timeValue(value) { try { return value?.toMillis?.() || new Date(value || 0).getTime() || 0; } catch { return 0; } }
 function selectedRatios() { return $$('input[name="ratio"]:checked').map(el => el.value); }
 function selectedPlatforms() { return $$('input[name="platform"]:checked').map(el => el.value); }
+function selectedAutomationMode() { return $('input[name="automationMode"]:checked')?.value || 'auto'; }
 function setMessage(text, error=false) { const el=$('#uploadMessage'); el.textContent=text; el.style.color=error?'#824d3d':''; }
 function setProgress(value) { const box=$('#uploadProgress'); box.classList.toggle('hidden', value == null); if(value!=null) box.firstElementChild.style.width=`${Math.max(0,Math.min(100,value))}%`; }
 function updateQueueButton() {
   const ready = !!currentUser && selectedRatios().length > 0 && (sourceMode==='device' ? !!$('#fileInput').files[0] : !!$('#sourceUrl').value.trim());
   $('#queueButton').disabled = !ready;
+}
+function syncAutomationUi() {
+  const mode=selectedAutomationMode();
+  $$('.mode-card').forEach(card=>card.classList.toggle('selected',card.querySelector('input')?.checked));
+  $('#autoPipeline').classList.toggle('auto-hidden',mode!=='auto');
+  $('#manualEditOptions').classList.toggle('auto-hidden',mode==='auto');
+  $('#queueButton').textContent=mode==='auto'?'Run auto edit on home desktop':'Queue manual edit on home desktop';
 }
 function safeFileName(file) {
   const cleaned=String(file?.name||'upload').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'');
@@ -53,12 +61,14 @@ $$('.tab').forEach(button => button.addEventListener('click', () => {
   updateQueueButton();
 }));
 $('#fileInput').addEventListener('change', () => { $('#fileName').textContent=$('#fileInput').files[0]?.name || 'Nothing selected'; updateQueueButton(); });
-$('#secondaryInput').addEventListener('change', () => { const n=$('#secondaryInput').files.length; $('#secondaryName').textContent=n ? `${n} camera file${n===1?'':'s'} selected` : 'Optional · multicam'; });
-$('#externalAudioInput').addEventListener('change', () => { $('#externalAudioName').textContent=$('#externalAudioInput').files[0]?.name || 'Optional · audio sync'; });
+$('#secondaryInput').addEventListener('change', () => { const n=$('#secondaryInput').files.length; $('#secondaryName').textContent=n ? `${n} camera file${n===1?'':'s'} selected` : 'Optional · auto-synced'; });
+$('#externalAudioInput').addEventListener('change', () => { $('#externalAudioName').textContent=$('#externalAudioInput').files[0]?.name || 'Optional · quality checked + synced'; });
 $('#logoInput').addEventListener('change', () => { $('#logoName').textContent=$('#logoInput').files[0]?.name || 'Optional · transparent PNG works best'; });
 $('#musicInput').addEventListener('change', () => { $('#musicName').textContent=$('#musicInput').files[0]?.name || 'Optional · auto-ducked under speech'; });
 $('#sourceUrl').addEventListener('input', updateQueueButton);
 $$('input[name="ratio"]').forEach(input => input.addEventListener('change', () => { input.closest('.ratio').classList.toggle('selected', input.checked); updateQueueButton(); }));
+$$('input[name="automationMode"]').forEach(input => input.addEventListener('change', syncAutomationUi));
+syncAutomationUi();
 
 async function authenticate() {
   if (currentUser) { await signOut(auth); return; }
@@ -77,6 +87,7 @@ async function resolveStoragePath(storagePath) {
 }
 function variantClass(ratio) { if (ratio === '16:9') return 'landscape'; if (ratio === '1:1') return 'square'; return ''; }
 function scoreLabel(value) { const score=Number(value); return Number.isFinite(score) ? `${Math.round(score)}/100` : ''; }
+function modeBadge(mode) { return mode==='auto' ? '<span class="auto-badge">Auto edit</span>' : ''; }
 
 async function renderDoneProject(project) {
   const groups = {};
@@ -96,25 +107,38 @@ async function renderDoneProject(project) {
       </div>`;
     }));
     const metrics=candidate.metrics || outputs[0]?.metrics || {};
-    const metricBits=['hook','clarity','payoff'].filter(k=>metrics[k]!=null).map(k=>`${k} ${Math.round(metrics[k])}`).join(' · ');
+    const metricBits=['hook','clarity','payoff','coherence'].filter(k=>metrics[k]!=null).map(k=>`${k} ${Math.round(metrics[k])}`).join(' · ');
     const hook=clipMeta.hookText ? `<div class="fine">Hook: ${escapeHtml(clipMeta.hookText)}</div>` : '';
     const brollProviders=[...new Set((clipMeta.visualCues||[]).map(cue=>cue.provider).filter(Boolean))];
     const broll=brollProviders.length ? `<div class="fine">B-roll: ${escapeHtml(brollProviders.join(' · '))}</div>` : '';
+    const profile=clipMeta.autoProfile || {};
+    const profileBits=[];
+    if(profile.broll_max_cues!=null) profileBits.push(`${profile.broll_max_cues} max B-roll cues`);
+    if(profile.caption_preset) profileBits.push(`${profile.caption_preset} captions`);
+    if(profile.punch_ins===false) profileBits.push('punch-ins reduced');
+    const autoProfile=profileBits.length?`<div class="fine">Auto decisions: ${escapeHtml(profileBits.join(' · '))}</div>`:'';
+    const stitched=(candidate.source_intervals||[]).length>1?`<div class="fine">Story stitch: ${candidate.source_intervals.length} coherent source slices</div>`:'';
     const score=scoreLabel(candidate.score ?? outputs[0]?.score);
-    blocks.push(`<div class="clip-block"><div class="clip-title"><strong>${escapeHtml(outputs[0]?.title || candidate.title || clipId)}</strong><span class="meta">${score ? `${score} · `:''}${outputs.length} version${outputs.length===1?'':'s'}</span></div>${metricBits?`<div class="fine">${escapeHtml(metricBits)}</div>`:''}${hook}${broll}<div class="variants">${variants.join('')}</div></div>`);
+    blocks.push(`<div class="clip-block"><div class="clip-title"><strong>${escapeHtml(outputs[0]?.title || candidate.title || clipId)}</strong><span class="meta">${score ? `${score} · `:''}${outputs.length} version${outputs.length===1?'':'s'}</span></div>${metricBits?`<div class="fine">${escapeHtml(metricBits)}</div>`:''}${stitched}${autoProfile}${hook}${broll}<div class="variants">${variants.join('')}</div></div>`);
   }
   const published=(project.publishPlatforms||[]).length ? `<div class="fine" style="margin-top:12px">Publish targets: ${escapeHtml((project.publishPlatforms||[]).join(' · '))}${(project.publishErrors||[]).length ? ` · ${project.publishErrors.length} publish issue${project.publishErrors.length===1?'':'s'}` : ' · submitted'}</div>` : '';
   const errors=(project.publishErrors||[]).length ? `<details class="extras"><summary>Publishing issues</summary><p class="fine">${(project.publishErrors||[]).map(escapeHtml).join('<br>')}</p></details>` : '';
   let plan='';
-  if(project.editPlanStoragePath){ try { const planUrl=await resolveStoragePath(project.editPlanStoragePath); plan=`<a class="plan-link" href="${escapeHtml(planUrl)}" download="edit_plan.json">Download editable plan</a>`; } catch {} }
+  if(project.editPlanStoragePath){ try { const planUrl=await resolveStoragePath(project.editPlanStoragePath); plan=`<a class="plan-link" href="${escapeHtml(planUrl)}" download="edit_plan.json">Edit plan</a>`; } catch {} }
+  let report='';
+  if(project.stageReportStoragePath){ try { const reportUrl=await resolveStoragePath(project.stageReportStoragePath); report=`<a class="plan-link" href="${escapeHtml(reportUrl)}" download="automation_report.json">Pipeline report</a>`; } catch {} }
   const hardware=project.hardwareProfile?.name ? ` · ${escapeHtml(project.hardwareProfile.name)}` : '';
-  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(project.sourceName || 'Untitled source')}</h3><div class="meta">${project.clipCount || Object.keys(groups).length} clips · ${(project.ratios||[]).join(' · ')}${hardware}</div></div><div class="project-actions">${plan}<span class="job-status done">done</span></div></div>${published}${errors}<div class="clips">${blocks.join('') || '<div class="fine">No output files were returned.</div>'}</div></article>`;
+  const mode=project.automationMode || 'manual';
+  return `<article class="project card"><div class="project-top"><div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>${escapeHtml(project.sourceName || 'Untitled source')}</h3>${modeBadge(mode)}</div><div class="meta">${project.clipCount || Object.keys(groups).length} clips · ${(project.ratios||[]).join(' · ')}${hardware}</div></div><div class="project-actions">${report}${plan}<span class="job-status done">done</span></div></div>${published}${errors}<div class="clips">${blocks.join('') || '<div class="fine">No output files were returned.</div>'}</div></article>`;
 }
 function renderJob(job) {
   const message = job.lastError ? `<div class="fine" style="margin-top:10px">${escapeHtml(job.lastError)}</div>` : '';
   const publish = job.publishPlatforms?.length ? ` · publish ${job.publishPlatforms.join(', ')}` : '';
-  const intelligence=`${job.smartCut===false?' · raw pauses':' · smart cuts'}${job.punchIns===false?'':' · punch-ins'}${job.musicStoragePath?' · music':''}`;
-  return `<article class="project card"><div class="project-top"><div><h3>${escapeHtml(job.sourceName || job.sourceUrl || 'Queued source')}</h3><div class="meta">${(job.ratios||[]).join(' · ')}${job.secondaryStoragePaths?.length ? ` · ${job.secondaryStoragePaths.length+1} cameras` : ''}${job.externalAudioStoragePath ? ' · separate mic' : ''}${escapeHtml(intelligence)}${escapeHtml(publish)}</div></div><span class="job-status ${escapeHtml(job.status)}">${escapeHtml(job.status || 'queued')}</span></div>${message}</article>`;
+  const mode=job.automationMode || 'manual';
+  const intelligence=mode==='auto'
+    ? ' · sync precomp · clean master · coherent selection · captions last · QA'
+    : `${job.smartCut===false?' · raw pauses':' · smart cuts'}${job.punchIns===false?'':' · punch-ins'}`;
+  return `<article class="project card"><div class="project-top"><div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>${escapeHtml(job.sourceName || job.sourceUrl || 'Queued source')}</h3>${modeBadge(mode)}</div><div class="meta">${(job.ratios||[]).join(' · ')}${job.secondaryStoragePaths?.length ? ` · ${job.secondaryStoragePaths.length+1} cameras` : ''}${job.externalAudioStoragePath ? ' · separate mic' : ''}${escapeHtml(intelligence)}${job.musicStoragePath?' · music':''}${escapeHtml(publish)}</div></div><span class="job-status ${escapeHtml(job.status)}">${escapeHtml(job.status || 'queued')}</span></div>${message}</article>`;
 }
 
 async function loadProjects() {
@@ -175,9 +199,11 @@ async function queueJob() {
   const uploadedPaths=[];
   let sent=0;
   let jobCreated=false;
+  const automationMode=selectedAutomationMode();
   const base={
     userId:currentUser.uid,
     status:'queued',
+    automationMode,
     ratios,
     alternateVisualLayouts:$('#alternateLayouts').checked,
     smartCut:$('#smartCut').checked,
@@ -197,7 +223,9 @@ async function queueJob() {
     createdAt:serverTimestamp(),
     updatedAt:serverTimestamp()
   };
-  $('#queueButton').disabled=true; setMessage('Preparing job…'); setProgress(totalBytes?0:null);
+  $('#queueButton').disabled=true;
+  setMessage(automationMode==='auto'?'Uploading raw files for the auto pipeline…':'Preparing manual edit job…');
+  setProgress(totalBytes?0:null);
   try {
     const extras={secondaryStoragePaths:[]};
     if (primaryFile) {
@@ -230,15 +258,14 @@ async function queueJob() {
     }
     await setDoc(jobRef,{...base,...extras});
     jobCreated=true;
-    setProgress(totalBytes?100:null); setMessage('Queued. Your home computer will claim it when the worker is online.');
+    setProgress(totalBytes?100:null);
+    setMessage(automationMode==='auto'
+      ? 'Queued. Your home computer will sync the raw files, build the clean master, select stories, edit, caption, and QA them automatically.'
+      : 'Queued. Your home computer will claim the manual edit job when the worker is online.');
     if(totalBytes) setTimeout(()=>setProgress(null),700);
     await loadProjects();
   } catch(error) {
     setProgress(null);
-    // A network timeout can make setDoc's result ambiguous: the server may have
-    // accepted the job even though the client saw an error. Verify before deleting
-    // uploaded sources; if verification itself fails, preserve them rather than
-    // breaking a potentially live queue item.
     if (!jobCreated && uploadedPaths.length) {
       let definitelyNotQueued=false;
       try { definitelyNotQueued=!(await getDoc(jobRef)).exists(); } catch {}
@@ -255,6 +282,7 @@ onAuthStateChanged(auth, async user => {
   $('#authButton').textContent=user?'Sign out':'Sign in';
   $('#workerState').textContent=user?'Checking home desktop…':'Waiting for sign-in';
   $('#workerState').className=`status-pill ${user?'live':'muted'}`;
+  syncAutomationUi();
   updateQueueButton();
   await loadProjects();
 });
