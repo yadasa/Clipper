@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .brand import BrandKit
@@ -15,7 +16,11 @@ def ass_time(seconds: float) -> str:
 
 
 def ass_escape(text: str) -> str:
-    return str(text).replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+    # One ASS Dialogue event must stay on one physical file line. Collapse raw
+    # line breaks from transcripts/hooks, then escape ASS override delimiters.
+    value = re.sub(r"[\r\n]+", " ", str(text))
+    value = re.sub(r"\s+", " ", value).strip()
+    return value.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
 def hex_to_ass(value: str, alpha: str = "00") -> str:
