@@ -3,13 +3,13 @@ uvicorn==0.46.0
 python-multipart==0.0.27
 httpx==0.28.1
 python-dotenv==1.2.2
-numpy>=2.0,<3
+# MediaPipe 0.10.x is still built around the stable NumPy 1.x ABI on Python 3.11.
+# Keep this below 2 until MediaPipe is upgraded and the full FFmpeg/runtime CI proves the transition.
+numpy>=1.26,<2
 Pillow==12.2.0
 yt-dlp
 faster-whisper==1.2.1
 google-genai==1.75.0
 firebase-admin>=7.0,<8
-scenedetect==0.7
-ultralytics==8.4.46
 mediapipe==0.10.14
 tqdm==4.67.3
