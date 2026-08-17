@@ -200,23 +200,27 @@ async function queueJob() {
   let sent=0;
   let jobCreated=false;
   const automationMode=selectedAutomationMode();
+  const automatic=automationMode==='auto';
+  const captionPreset=automatic?'karaoke':$('#captionPreset').value;
   const base={
     userId:currentUser.uid,
     status:'queued',
     automationMode,
     ratios,
     alternateVisualLayouts:$('#alternateLayouts').checked,
-    smartCut:$('#smartCut').checked,
-    removeFillers:$('#removeFillers').checked,
-    punchIns:$('#punchIns').checked,
-    hookOverlay:$('#hookOverlay').checked,
-    captionPreset:$('#captionPreset').value,
+    // Auto Mode is a complete pipeline. Hidden manual toggles must not silently
+    // leak into it if the user experimented with Manual and switched back.
+    smartCut:automatic ? true : $('#smartCut').checked,
+    removeFillers:automatic ? true : $('#removeFillers').checked,
+    punchIns:automatic ? true : $('#punchIns').checked,
+    hookOverlay:automatic ? true : $('#hookOverlay').checked,
+    captionPreset,
     brand:{
       name:'web',
       accent:$('#brandAccent').value,
       primary_text:$('#brandText').value,
       font:$('#brandFont').value.trim() || 'Arial',
-      caption_preset:$('#captionPreset').value,
+      caption_preset:captionPreset,
     },
     publishPlatforms:selectedPlatforms(),
     publishDescription:$('#publishDescription').value.trim(),
