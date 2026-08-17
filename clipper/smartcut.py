@@ -4,7 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, audio_encode_args, video_encode_args
+from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
 
 from .audio import has_audio
 from .models import ClipCandidate, Word
@@ -164,7 +164,12 @@ def prepare_compacted_clip(
     intervals: list[KeepInterval],
     output_path: str | Path,
 ) -> Path:
-    """Render the EDL in one FFmpeg process, with or without source audio."""
+    """Render the EDL in one FFmpeg process, with or without source audio.
+
+    Intermediate audio is encoded without loudness normalization. Final delivery
+    applies loudnorm once, avoiding repeated dynamics processing when smart cuts
+    and punch-ins are both enabled.
+    """
     if not intervals:
         raise ValueError("At least one keep interval is required")
     out = Path(output_path)
@@ -198,7 +203,7 @@ def prepare_compacted_clip(
         cmd += ["-map", "[aout]"]
     cmd += video_encode_args(QUALITY_FAST)
     if source_has_audio:
-        cmd += [*audio_encode_args(), "-b:a", "192k"]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(out)]
     try:
         subprocess.run(cmd, check=True)
