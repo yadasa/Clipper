@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from clipper.brand import BrandKit
-from clipper.models import ClipCandidate, Word
+from clipper.models import ClipCandidate, VisualCue, Word
 from clipper.motion import PunchIn, apply_punch_ins
 from clipper.render import render_clip
 from clipper.smartcut import KeepInterval, build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
@@ -43,8 +43,10 @@ def main() -> int:
         root = Path(tmp)
         source = root / "source.mp4"
         silent_source = root / "silent-source.mp4"
+        broll = root / "broll.mp4"
         music = root / "music.m4a"
         logo = root / "logo.png"
+
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
@@ -60,6 +62,12 @@ def main() -> int:
         ])
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30",
+            "-t", "0.8", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+            "-pix_fmt", "yuv420p", "-an", str(broll),
+        ])
+        run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "sine=frequency=180:sample_rate=48000",
             "-t", "1", "-c:a", "aac", str(music),
         ])
@@ -68,7 +76,14 @@ def main() -> int:
             "-f", "lavfi", "-i", "color=c=white:s=180x70", "-frames:v", "1", str(logo),
         ])
 
-        candidate = ClipCandidate("smoke", 0.0, 3.2, 80, "A smoke-test hook", transcript="This is actually important because the edit works.")
+        candidate = ClipCandidate(
+            "smoke",
+            0.0,
+            3.2,
+            80,
+            "A smoke-test hook",
+            transcript="This is actually important because the edit works.",
+        )
         words = [
             Word("This", 0.05, 0.25),
             Word("is", 0.28, 0.40),
@@ -77,12 +92,25 @@ def main() -> int:
             Word("because", 2.45, 2.65),
             Word("works.", 2.72, 2.98),
         ]
-        intervals = build_keep_intervals(candidate, words, max_silence=0.55, retained_silence=0.12, remove_fillers=True)
+        intervals = build_keep_intervals(
+            candidate,
+            words,
+            max_silence=0.55,
+            retained_silence=0.12,
+            remove_fillers=True,
+        )
         assert compact_duration(intervals) < candidate.duration
         cut = root / "cut.mp4"
         prepare_compacted_clip(source, intervals, cut)
         mapped = remap_words(words, intervals)
-        local = ClipCandidate("smoke", 0.0, compact_duration(intervals), 80, candidate.title, transcript=candidate.transcript)
+        local = ClipCandidate(
+            "smoke",
+            0.0,
+            compact_duration(intervals),
+            80,
+            candidate.title,
+            transcript=candidate.transcript,
+        )
 
         motion = root / "motion.mp4"
         apply_punch_ins(cut, [PunchIn(0.4, min(local.duration, 1.4), 1.08)], motion)
@@ -94,12 +122,25 @@ def main() -> int:
             logo_path=str(logo),
             logo_position="top-right",
         )
+        visual_cues = [
+            VisualCue(
+                0.3,
+                min(local.duration, 1.8),
+                "important",
+                "important concept",
+                "",
+                modes=["pip"],
+                asset_path=str(broll),
+                asset_type="video",
+                provider="smoke",
+            )
+        ]
         output = root / "final.mp4"
         render_clip(
             motion,
             local,
             mapped,
-            [],
+            visual_cues,
             output,
             ratio="9:16",
             brand=brand,
@@ -108,8 +149,6 @@ def main() -> int:
         )
         assert_video(output, width=1080, height=1920)
 
-        # Break the usual creator-video assumption by using a source with no audio.
-        # Smart cuts and punch-ins must still work instead of referring to [0:a].
         silent_cut = root / "silent-cut.mp4"
         prepare_compacted_clip(
             silent_source,
