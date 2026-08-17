@@ -1,4 +1,4 @@
-from clipper.brand import BrandKit, load_brand, normalize_brand
+from clipper.brand import load_brand, normalize_brand
 
 
 def test_default_brand_honors_caption_preset_environment(monkeypatch):
@@ -17,3 +17,11 @@ def test_bad_brand_values_fall_back_safely():
     assert kit.primary_text == "#123456"
     assert kit.caption_preset == "karaoke"
     assert kit.logo_position == "top-right"
+
+
+def test_ass_font_name_cannot_break_style_csv_or_lines():
+    kit = normalize_brand({"font": "Inter,Injected\nStyle: Evil"})
+    assert kit.font == "Inter Injected Style: Evil"
+    assert "," not in kit.font
+    assert "\n" not in kit.font
+    assert "\r" not in kit.font
