@@ -89,7 +89,7 @@ def pull_commons_image(
     output_dir: str | Path,
     index: int = 0,
     *,
-    max_bytes: int = 80 * 1024 * 1024,
+    max_bytes: int | None = None,
 ) -> tuple[Path | None, dict]:
     """Pull a reusable raster image from Wikimedia Commons and cache it locally."""
     out = Path(output_dir)
@@ -98,6 +98,8 @@ def pull_commons_image(
     if cached is not None:
         return cached, attribution
 
+    if max_bytes is None:
+        max_bytes = Settings().broll_max_download_mb * 1024 * 1024
     max_bytes = max(1024 * 1024, int(max_bytes))
     params = {
         "action": "query", "format": "json", "generator": "search",
