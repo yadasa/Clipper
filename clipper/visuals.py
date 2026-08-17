@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 
 import httpx
@@ -11,6 +12,9 @@ from .models import VisualCue
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 USER_AGENT = "Clipper/0.1 (local creator video editor)"
+_SUPPORTED_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp"}
+_DIFFUSION_CACHE: dict[tuple[str, str], object] = {}
+_DIFFUSION_LOCK = threading.Lock()
 
 
 def _safe_name(value: str) -> str:
@@ -19,7 +23,7 @@ def _safe_name(value: str) -> str:
 
 
 def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tuple[Path | None, dict]:
-    """Pull a reusable image from Wikimedia Commons and save attribution metadata."""
+    """Pull a reusable raster image from Wikimedia Commons and save attribution metadata."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     params = {
@@ -27,7 +31,7 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
         "gsrsearch": query, "gsrnamespace": "6", "gsrlimit": "8",
         "prop": "imageinfo", "iiprop": "url|mime|extmetadata",
     }
-    with httpx.Client(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
+    with httpx.Client(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
         response = client.get(COMMONS_API, params=params)
         response.raise_for_status()
         pages = list((response.json().get("query", {}).get("pages", {}) or {}).values())
@@ -37,14 +41,12 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
             info = (page.get("imageinfo") or [{}])[0]
             mime = str(info.get("mime") or "")
             url = str(info.get("url") or "")
-            if mime.startswith("image/") and url:
+            if mime in _SUPPORTED_IMAGE_MIME and url:
                 candidates.append((page, info))
         if not candidates:
             return None, {}
         page, info = candidates[min(index, len(candidates) - 1)]
-        suffix = Path(str(info.get("url"))).suffix.split("?")[0]
-        if suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
-            suffix = ".jpg"
+        suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(str(info.get("mime")), ".jpg")
         path = out / f"commons-{_safe_name(query)}{suffix}"
         media = client.get(str(info["url"]))
         media.raise_for_status()
@@ -62,8 +64,7 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
         return path, attribution
 
 
-def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings | None = None) -> Path:
-    settings = settings or Settings()
+def _diffusion_pipeline(settings: Settings):
     if not settings.diffusion_model:
         raise RuntimeError("DIFFUSION_MODEL must be set for local generated visuals")
     try:
@@ -71,10 +72,27 @@ def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings
         from diffusers import DiffusionPipeline
     except ImportError as exc:
         raise RuntimeError("Install requirements-ai.txt to enable local image generation") from exc
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    pipeline = DiffusionPipeline.from_pretrained(settings.diffusion_model, torch_dtype=dtype)
-    if torch.cuda.is_available():
-        pipeline = pipeline.to("cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    key = (settings.diffusion_model, device)
+    if key not in _DIFFUSION_CACHE:
+        with _DIFFUSION_LOCK:
+            if key not in _DIFFUSION_CACHE:
+                dtype = torch.float16 if device == "cuda" else torch.float32
+                pipeline = DiffusionPipeline.from_pretrained(settings.diffusion_model, torch_dtype=dtype)
+                if device == "cuda":
+                    pipeline = pipeline.to("cuda")
+                else:
+                    try:
+                        pipeline.enable_attention_slicing()
+                    except Exception:
+                        pass
+                _DIFFUSION_CACHE[key] = pipeline
+    return _DIFFUSION_CACHE[key]
+
+
+def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings | None = None) -> Path:
+    settings = settings or Settings()
+    pipeline = _diffusion_pipeline(settings)
     image = pipeline(prompt, num_inference_steps=24).images[0]
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
