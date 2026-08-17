@@ -45,6 +45,18 @@ def _nvidia_info() -> tuple[str | None, float | None]:
 
 
 def _cuda_available() -> bool:
+    """Check the CUDA runtime used by faster-whisper first, then optional PyTorch.
+
+    CTranslate2 ships with faster-whisper and is the relevant inference backend for
+    Clipper's transcription path. This avoids making the large PyTorch package a
+    mandatory base dependency just to detect the GPU.
+    """
+    try:
+        import ctranslate2
+        if int(ctranslate2.get_cuda_device_count()) > 0:
+            return True
+    except Exception:
+        pass
     try:
         import torch
         return bool(torch.cuda.is_available())
