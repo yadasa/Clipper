@@ -8,21 +8,36 @@ from typing import Any
 
 
 def file_fingerprint(path: str | Path, *, sample_bytes: int = 1024 * 1024) -> str:
-    """Fast content-aware fingerprint for large media files.
+    """Fast, copy-stable content fingerprint for large media files.
 
-    Hashes size + mtime + first/last sample. It avoids reading multi-GB recordings
-    end-to-end while still invalidating when the file materially changes.
+    Cache identity must survive Firebase/local ingest copying the same recording
+    into a new project, so filesystem mtime is deliberately excluded. Instead we
+    hash file size plus sampled content from the beginning, middle, and end. The
+    middle sample closes the old blind spot where two same-size files with equal
+    first/last megabytes could collide even if their actual video payload differed.
     """
     p = Path(path)
     stat = p.stat()
+    size = int(stat.st_size)
+    sample = max(64 * 1024, int(sample_bytes))
     h = hashlib.sha256()
-    h.update(str(stat.st_size).encode())
-    h.update(str(stat.st_mtime_ns).encode())
+    h.update(b"clipper-media-fingerprint-v2\0")
+    h.update(str(size).encode())
+
+    offsets = [0]
+    if size > sample:
+        offsets.extend([
+            max(0, (size - sample) // 2),
+            max(0, size - sample),
+        ])
+
     with p.open("rb") as handle:
-        h.update(handle.read(sample_bytes))
-        if stat.st_size > sample_bytes:
-            handle.seek(max(0, stat.st_size - sample_bytes))
-            h.update(handle.read(sample_bytes))
+        for offset in sorted(set(offsets)):
+            handle.seek(offset)
+            chunk = handle.read(sample)
+            h.update(str(offset).encode())
+            h.update(b"\0")
+            h.update(chunk)
     return h.hexdigest()
 
 
