@@ -77,7 +77,33 @@
           <label class="ratio"><input type="checkbox" name="ratio" value="1:1" /><strong>1:1</strong><small>Square feed</small></label>
           <label class="ratio"><input type="checkbox" name="ratio" value="16:9" /><strong>16:9</strong><small>YouTube · desktop</small></label>
         </div>
-        <label class="check"><input id="alternateLayouts" type="checkbox" checked /><span>Return alternate visual edits (split, PIP, interrupt)</span></label>
+        <label class="check"><input id="alternateLayouts" type="checkbox" /><span>Also render alternate visual edits (split, PIP, interrupt)</span></label>
+        <p class="fine">Automatic mode already chooses a layout per visual. Alternate renders multiply encoding time, so they are opt-in.</p>
+
+        <details class="extras publish-options">
+          <summary>Auto-publish when editing finishes</summary>
+          <p class="fine">Optional. Requires Upload-Post credentials on the home desktop. Each platform gets the closest selected aspect ratio.</p>
+          <div class="platform-grid">
+            <label><input type="checkbox" name="platform" value="tiktok" />TikTok</label>
+            <label><input type="checkbox" name="platform" value="instagram" />Instagram</label>
+            <label><input type="checkbox" name="platform" value="youtube" />YouTube</label>
+            <label><input type="checkbox" name="platform" value="facebook" />Facebook</label>
+            <label><input type="checkbox" name="platform" value="threads" />Threads</label>
+            <label><input type="checkbox" name="platform" value="twitter" />X / Twitter</label>
+            <label><input type="checkbox" name="platform" value="linkedin" />LinkedIn</label>
+            <label><input type="checkbox" name="platform" value="pinterest" />Pinterest</label>
+            <label><input type="checkbox" name="platform" value="bluesky" />Bluesky</label>
+            <label><input type="checkbox" name="platform" value="reddit" />Reddit</label>
+            <label><input type="checkbox" name="platform" value="discord" />Discord</label>
+            <label><input type="checkbox" name="platform" value="telegram" />Telegram</label>
+            <label><input type="checkbox" name="platform" value="google_business" />Google Business</label>
+            <label><input type="checkbox" name="platform" value="mastodon" />Mastodon</label>
+            <label><input type="checkbox" name="platform" value="wordpress" />WordPress</label>
+          </div>
+          <label class="field-label" for="publishDescription">Post description / caption</label>
+          <textarea id="publishDescription" class="text-input publish-copy" rows="3" placeholder="Optional caption shared with the selected platforms"></textarea>
+        </details>
+
         <button id="queueButton" class="button primary wide" disabled>Queue on home desktop</button>
         <div id="uploadProgress" class="progress hidden"><div></div></div>
         <p id="uploadMessage" class="fine"></p>
