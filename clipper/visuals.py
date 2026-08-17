@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -12,7 +13,7 @@ from .config import Settings
 from .models import VisualCue
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "Clipper/0.1 (local creator video editor)"
+USER_AGENT = "Clipper/0.2 (local creator video editor)"
 _SUPPORTED_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp"}
 _DIFFUSION_CACHE: dict[tuple[str, str], object] = {}
 _DIFFUSION_LOCK = threading.Lock()
@@ -37,6 +38,13 @@ def _read_attribution(path: Path) -> dict:
         return {}
 
 
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".part")
+    temp.write_bytes(content)
+    os.replace(temp, path)
+
+
 def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | None, dict]:
     safe = _safe_name(query)
     key = _cache_key(f"{query}\0{index}")
@@ -44,7 +52,6 @@ def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | N
         candidate = out / f"commons-{safe}-{key}{suffix}"
         if candidate.is_file() and candidate.stat().st_size > 0:
             return candidate, _read_attribution(candidate)
-    # Backward compatibility with assets written before keyed caching was added.
     for suffix in (".jpg", ".png", ".webp"):
         candidate = out / f"commons-{safe}{suffix}"
         if candidate.is_file() and candidate.stat().st_size > 0:
@@ -53,12 +60,7 @@ def _existing_commons_asset(out: Path, query: str, index: int) -> tuple[Path | N
 
 
 def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tuple[Path | None, dict]:
-    """Pull a reusable raster image from Wikimedia Commons and cache it locally.
-
-    A rerender with the same semantic query should not repeat a network request or
-    silently swap the visual underneath an unchanged edit plan. Assets are keyed
-    by query + requested result index and keep their attribution beside the file.
-    """
+    """Pull a reusable raster image from Wikimedia Commons and cache it locally."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     cached, attribution = _existing_commons_asset(out, query, index)
@@ -74,7 +76,7 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
         response = client.get(COMMONS_API, params=params)
         response.raise_for_status()
         pages = list((response.json().get("query", {}).get("pages", {}) or {}).values())
-        pages.sort(key=lambda p: int(p.get("index", 9999)))
+        pages.sort(key=lambda page: int(page.get("index", 9999)))
         candidates = []
         for page in pages:
             info = (page.get("imageinfo") or [{}])[0]
@@ -84,13 +86,19 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
                 candidates.append((page, info))
         if not candidates:
             return None, {}
+
         page, info = candidates[min(max(0, int(index)), len(candidates) - 1)]
-        suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(str(info.get("mime")), ".jpg")
+        suffix = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }.get(str(info.get("mime")), ".jpg")
         key = _cache_key(f"{query}\0{index}")
         path = out / f"commons-{_safe_name(query)}-{key}{suffix}"
         media = client.get(str(info["url"]))
         media.raise_for_status()
-        path.write_bytes(media.content)
+        _write_bytes_atomic(path, media.content)
+
         meta = info.get("extmetadata") or {}
         attribution = {
             "source": "Wikimedia Commons",
@@ -100,7 +108,10 @@ def pull_commons_image(query: str, output_dir: str | Path, index: int = 0) -> tu
             "license": (meta.get("LicenseShortName") or {}).get("value"),
             "license_url": (meta.get("LicenseUrl") or {}).get("value"),
         }
-        path.with_suffix(path.suffix + ".json").write_text(json.dumps(attribution, indent=2), encoding="utf-8")
+        sidecar = path.with_suffix(path.suffix + ".json")
+        temp = sidecar.with_name(sidecar.name + ".tmp")
+        temp.write_text(json.dumps(attribution, indent=2), encoding="utf-8")
+        os.replace(temp, sidecar)
         return path, attribution
 
 
@@ -112,6 +123,7 @@ def _diffusion_pipeline(settings: Settings):
         from diffusers import DiffusionPipeline
     except ImportError as exc:
         raise RuntimeError("Install requirements-ai.txt to enable local image generation") from exc
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     key = (settings.diffusion_model, device)
     if key not in _DIFFUSION_CACHE:
@@ -130,7 +142,11 @@ def _diffusion_pipeline(settings: Settings):
     return _DIFFUSION_CACHE[key]
 
 
-def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings | None = None) -> Path:
+def generate_local_image(
+    prompt: str,
+    output_dir: str | Path,
+    settings: Settings | None = None,
+) -> Path:
     settings = settings or Settings()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -138,26 +154,21 @@ def generate_local_image(prompt: str, output_dir: str | Path, settings: Settings
     path = out / f"generated-{_safe_name(prompt[:80])}-{identity}.png"
     if path.is_file() and path.stat().st_size > 0:
         return path
+
     pipeline = _diffusion_pipeline(settings)
     image = pipeline(prompt, num_inference_steps=24).images[0]
-    image.save(path)
+    temp = path.with_name(path.stem + ".part.png")
+    image.save(temp)
+    os.replace(temp, path)
     return path
 
 
-def resolve_visuals(cues: list[VisualCue], output_dir: str | Path, settings: Settings | None = None) -> list[VisualCue]:
-    settings = settings or Settings()
-    provider = settings.visual_provider
-    for i, cue in enumerate(cues):
-        path: Path | None = None
-        if provider in {"commons", "auto"}:
-            try:
-                path, _ = pull_commons_image(cue.query or cue.transcript, Path(output_dir) / f"cue_{i:02d}")
-            except Exception:
-                path = None
-        if path is None and provider in {"diffusers", "auto"} and settings.diffusion_model:
-            try:
-                path = generate_local_image(cue.prompt or cue.transcript, Path(output_dir) / f"cue_{i:02d}", settings)
-            except Exception:
-                path = None
-        cue.asset_path = str(path) if path else None
-    return cues
+def resolve_visuals(
+    cues: list[VisualCue],
+    output_dir: str | Path,
+    settings: Settings | None = None,
+) -> list[VisualCue]:
+    """Backward-compatible entry point for the multi-provider B-roll resolver."""
+    from .broll import resolve_broll
+
+    return resolve_broll(cues, output_dir, settings)
