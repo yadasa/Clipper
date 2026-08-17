@@ -8,7 +8,33 @@ from .brand import BrandKit, normalize_brand
 from .config import normalize_ratios
 from .models import ClipCandidate
 
-PLAN_VERSION = 1
+PLAN_VERSION = 2
+
+
+def _clean_intervals(raw: object, start: float, end: float) -> list[dict[str, float]]:
+    if not isinstance(raw, list):
+        return []
+    clean: list[dict[str, float]] = []
+    previous_end = -1.0
+    for value in raw:
+        if not isinstance(value, dict):
+            continue
+        try:
+            item_start = float(value.get("start", 0))
+            item_end = float(value.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if item_start < 0 or item_end <= item_start:
+            raise ValueError(f"Invalid stitched source interval: {item_start}..{item_end}")
+        if item_start < previous_end - 0.001:
+            raise ValueError("Stitched source intervals must be chronological and non-overlapping")
+        clean.append({"start": round(item_start, 4), "end": round(item_end, 4)})
+        previous_end = item_end
+    if len(clean) <= 1:
+        return []
+    if clean[0]["start"] < start - 0.01 or clean[-1]["end"] > end + 0.01:
+        raise ValueError("Stitched source intervals must stay inside the clip envelope")
+    return clean
 
 
 def generate_edit_plan(
@@ -32,6 +58,7 @@ def generate_edit_plan(
             "remove_fillers": True,
             "punch_ins": True,
             "hook_overlay": True,
+            "broll_max_cues": None,
         },
         "clips": [
             {
@@ -39,6 +66,7 @@ def generate_edit_plan(
                 "enabled": True,
                 "start": round(candidate.start, 3),
                 "end": round(candidate.end, 3),
+                "source_intervals": list(candidate.source_intervals),
                 "title": candidate.title,
                 "score": candidate.score,
                 "metrics": dict(candidate.metrics),
@@ -51,6 +79,8 @@ def generate_edit_plan(
                 "punch_ins": True,
                 "hook_overlay": True,
                 "hook_text": None,
+                "broll_max_cues": None,
+                "auto_profile": {},
             }
             for candidate in candidates
         ],
@@ -60,8 +90,11 @@ def generate_edit_plan(
 def validate_edit_plan(plan: dict) -> dict:
     if not isinstance(plan, dict):
         raise ValueError("Edit plan must be a JSON object")
-    if int(plan.get("version", 0)) != PLAN_VERSION:
+    version = int(plan.get("version", 0))
+    if version not in {1, PLAN_VERSION}:
         raise ValueError(f"Unsupported edit plan version: {plan.get('version')}")
+    # V1 is upgraded in memory; saves always write V2.
+    plan["version"] = PLAN_VERSION
     plan["brand"] = normalize_brand(plan.get("brand")).to_dict()
     defaults = dict(plan.get("defaults") or {})
     clips = plan.get("clips")
@@ -80,6 +113,7 @@ def validate_edit_plan(plan: dict) -> dict:
         end = float(raw.get("end", 0))
         if start < 0 or end <= start:
             raise ValueError(f"Invalid clip range for {clip_id}: {start}..{end}")
+        intervals = _clean_intervals(raw.get("source_intervals"), start, end)
         ratios = normalize_ratios(raw.get("ratios") or ["9:16"])
         modes = [m for m in raw.get("layout_modes", ["auto"]) if m in {"auto", "split", "pip", "interrupt"}]
         if not modes:
@@ -87,12 +121,18 @@ def validate_edit_plan(plan: dict) -> dict:
         preset = str(raw.get("caption_preset") or defaults.get("caption_preset") or "karaoke")
         if preset not in {"karaoke", "clean", "minimal"}:
             preset = "karaoke"
+        cue_value = raw.get("broll_max_cues", defaults.get("broll_max_cues"))
+        try:
+            broll_max_cues = max(0, min(12, int(cue_value))) if cue_value is not None else None
+        except (TypeError, ValueError):
+            broll_max_cues = None
         clean.append({
             **raw,
             "id": clip_id,
             "enabled": bool(raw.get("enabled", True)),
             "start": start,
             "end": end,
+            "source_intervals": intervals,
             "title": str(raw.get("title") or clip_id)[:160],
             "score": float(raw.get("score", 0)),
             "metrics": dict(raw.get("metrics") or {}),
@@ -105,6 +145,8 @@ def validate_edit_plan(plan: dict) -> dict:
             "punch_ins": bool(raw.get("punch_ins", defaults.get("punch_ins", True))),
             "hook_overlay": bool(raw.get("hook_overlay", defaults.get("hook_overlay", True))),
             "hook_text": str(raw.get("hook_text"))[:120] if raw.get("hook_text") else None,
+            "broll_max_cues": broll_max_cues,
+            "auto_profile": dict(raw.get("auto_profile") or {}),
         })
     plan["clips"] = clean
     plan["defaults"] = defaults
@@ -114,13 +156,7 @@ def validate_edit_plan(plan: dict) -> dict:
 
 
 def _persist_asset(value: str | None, project_root: Path, stem: str) -> str | None:
-    """Keep a plan asset self-contained and return a project-relative path.
-
-    Existing files already inside the project are reused. Absolute paths and
-    relative paths that resolve outside the project are copied into ``assets/``;
-    this prevents ``../`` references from making a supposedly portable rerender
-    depend on arbitrary files elsewhere on the workstation.
-    """
+    """Keep a plan asset self-contained and return a project-relative path."""
     if not value:
         return None
     root = project_root.resolve()
@@ -153,9 +189,6 @@ def save_edit_plan(plan: dict, path: str | Path) -> Path:
     clean = validate_edit_plan(plan)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    # Make rerenders self-contained. This is especially important for FastAPI
-    # uploads whose temporary staging files are deleted once the first job ends.
     brand = dict(clean.get("brand") or {})
     brand["logo_path"] = _persist_asset(brand.get("logo_path"), out.parent, "logo")
     clean["brand"] = brand
@@ -181,4 +214,5 @@ def candidate_from_plan(item: dict) -> ClipCandidate:
         reason="Edit plan",
         transcript=str(item.get("transcript") or ""),
         metrics={str(k): float(v) for k, v in dict(item.get("metrics") or {}).items()},
+        source_intervals=[dict(value) for value in item.get("source_intervals") or []],
     )
