@@ -12,6 +12,8 @@ jobs:
   static-and-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,6 +25,6 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q .
       - name: Run unit tests
-        run: pytest -q
+        run: python -m pytest -q
       - name: Parse browser JavaScript as an ES module
         run: node --check --input-type=module < web/app.js
