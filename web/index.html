@@ -50,6 +50,22 @@
           <label class="check ownership"><input id="ownContentAck" type="checkbox" /> <span>I own this post or have permission to reuse it.</span></label>
           <p class="fine">The desktop worker requests the best clean/original stream the platform exposes to your account. It does not erase a baked-in watermark from somebody else’s video.</p>
         </div>
+        <details class="extras">
+          <summary>Sync another camera or separate microphone</summary>
+          <div class="extra-grid">
+            <label class="mini-upload" for="secondaryInput">
+              <input id="secondaryInput" type="file" accept="video/*" multiple />
+              <strong>Extra camera(s)</strong>
+              <span id="secondaryName">Optional · multicam</span>
+            </label>
+            <label class="mini-upload" for="externalAudioInput">
+              <input id="externalAudioInput" type="file" accept="audio/*,video/*" />
+              <strong>Separate mic</strong>
+              <span id="externalAudioName">Optional · audio sync</span>
+            </label>
+          </div>
+          <p class="fine">Clipper matches spoken words first, falls back to waveform correlation, estimates recorder drift, then cuts multicam edits on speech boundaries.</p>
+        </details>
       </article>
 
       <article class="card options-card">
