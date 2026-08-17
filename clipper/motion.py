@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -115,6 +116,8 @@ def apply_punch_ins(source_path: str | Path, events: list[PunchIn], output_path:
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    temp = out.with_name(f"{out.stem}.part{out.suffix or '.mp4'}")
+    temp.unlink(missing_ok=True)
     cmd = [
         "ffmpeg", "-y", "-v", "warning", "-i", str(source_path),
         "-filter_complex", ";".join(filters), "-map", "[vout]",
@@ -126,6 +129,19 @@ def apply_punch_ins(source_path: str | Path, events: list[PunchIn], output_path:
     # loudness normalization only once in the final delivery render.
     if source_has_audio:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
-    cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(out)]
-    subprocess.run(cmd, check=True)
+    cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(temp)]
+    try:
+        subprocess.run(cmd, check=True)
+        if not temp.is_file() or temp.stat().st_size <= 0:
+            raise RuntimeError("Punch-in FFmpeg produced no output")
+        os.replace(temp, out)
+    except FileNotFoundError as exc:
+        temp.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg is required for punch-in rendering") from exc
+    except subprocess.CalledProcessError as exc:
+        temp.unlink(missing_ok=True)
+        raise RuntimeError(f"Punch-in FFmpeg render failed: {exc}") from exc
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     return out
