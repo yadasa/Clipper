@@ -25,7 +25,7 @@
       <div>
         <div class="eyebrow">DROP IT HERE. LET HOME HANDLE THE REST.</div>
         <h2>Send a recording to your desktop editing queue.</h2>
-        <p>Upload from this device or paste a link to social content you own. Your home worker clips, captions, reframes, adds context visuals, and returns every selected format here.</p>
+        <p>Upload from this device or paste a link to social content you own. Your home worker clips, captions, reframes, cleans pauses, adds context visuals, and returns every selected format here.</p>
       </div>
       <div id="workerState" class="status-pill muted">Waiting for sign-in</div>
     </section>
@@ -67,6 +67,27 @@
           </div>
           <p class="fine">Clipper matches spoken words first, falls back to waveform correlation, estimates recorder drift, then cuts multicam edits on speech boundaries.</p>
         </details>
+
+        <details class="extras">
+          <summary>Brand + music</summary>
+          <div class="extra-grid">
+            <label class="mini-upload" for="logoInput">
+              <input id="logoInput" type="file" accept="image/png,image/jpeg,image/webp" />
+              <strong>Logo</strong>
+              <span id="logoName">Optional · transparent PNG works best</span>
+            </label>
+            <label class="mini-upload" for="musicInput">
+              <input id="musicInput" type="file" accept="audio/*" />
+              <strong>Music bed</strong>
+              <span id="musicName">Optional · auto-ducked under speech</span>
+            </label>
+          </div>
+          <div class="brand-grid">
+            <label><span>Accent</span><input id="brandAccent" type="color" value="#d6a77a" /></label>
+            <label><span>Text</span><input id="brandText" type="color" value="#ffffff" /></label>
+            <label class="brand-font"><span>Font</span><input id="brandFont" class="text-input" value="Arial" maxlength="80" /></label>
+          </div>
+        </details>
       </article>
 
       <article class="card options-card">
@@ -77,6 +98,23 @@
           <label class="ratio"><input type="checkbox" name="ratio" value="1:1" /><strong>1:1</strong><small>Square feed</small></label>
           <label class="ratio"><input type="checkbox" name="ratio" value="16:9" /><strong>16:9</strong><small>YouTube · desktop</small></label>
         </div>
+
+        <details class="extras edit-options" open>
+          <summary>Edit intelligence</summary>
+          <div class="toggle-grid">
+            <label class="check"><input id="smartCut" type="checkbox" checked /><span><strong>Smart cuts</strong><small>Tighten dead air</small></span></label>
+            <label class="check"><input id="removeFillers" type="checkbox" checked /><span><strong>Filler cleanup</strong><small>Only safe “um/uh” cuts</small></span></label>
+            <label class="check"><input id="punchIns" type="checkbox" checked /><span><strong>Punch-ins</strong><small>Emphasis zooms</small></span></label>
+            <label class="check"><input id="hookOverlay" type="checkbox" checked /><span><strong>Hook card</strong><small>Opening title overlay</small></span></label>
+          </div>
+          <label class="field-label" for="captionPreset">Caption style</label>
+          <select id="captionPreset" class="text-input select-input">
+            <option value="karaoke" selected>Karaoke · active word highlight</option>
+            <option value="clean">Clean · grouped captions</option>
+            <option value="minimal">Minimal · smaller / lighter</option>
+          </select>
+        </details>
+
         <label class="check"><input id="alternateLayouts" type="checkbox" /><span>Also render alternate visual edits (split, PIP, interrupt)</span></label>
         <p class="fine">Automatic mode already chooses a layout per visual. Alternate renders multiply encoding time, so they are opt-in.</p>
 
@@ -101,7 +139,7 @@
             <label><input type="checkbox" name="platform" value="wordpress" />WordPress</label>
           </div>
           <label class="field-label" for="publishDescription">Post description / caption</label>
-          <textarea id="publishDescription" class="text-input publish-copy" rows="3" placeholder="Optional caption shared with the selected platforms"></textarea>
+          <textarea id="publishDescription" class="text-input publish-copy" rows="3" placeholder="Optional; leave blank to use Clipper’s generated copy"></textarea>
         </details>
 
         <button id="queueButton" class="button primary wide" disabled>Queue on home desktop</button>
