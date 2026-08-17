@@ -60,6 +60,7 @@ def generate_social_metadata(candidate: ClipCandidate, settings: Settings | None
     try:
         from google import genai
         from google.genai import types
+
         client = genai.Client(api_key=settings.gemini_api_key)
         response = client.models.generate_content(
             model=settings.gemini_model,
@@ -78,10 +79,8 @@ def generate_social_metadata(candidate: ClipCandidate, settings: Settings | None
             tag = re.sub(r"[^A-Za-z0-9]", "", str(item).lstrip("#"))
             if tag and f"#{tag}" not in hashtags:
                 hashtags.append(f"#{tag}")
-        if hashtags:
-            base_caption = caption
-            if not any(tag.lower() in caption.lower() for tag in hashtags):
-                caption = f"{caption}\n\n{' '.join(hashtags[:8])}".strip()
+        if hashtags and not any(tag.lower() in caption.lower() for tag in hashtags):
+            caption = f"{caption}\n\n{' '.join(hashtags[:8])}".strip()
         result = local_social_metadata(candidate)
         result["title"] = title
         result["caption"] = caption
