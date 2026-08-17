@@ -85,7 +85,7 @@ def copy_local_source(
     *,
     prefer_hardlink: bool = False,
 ) -> Path:
-    """Persist a local source inside a project.
+    """Persist a local source inside a project without exposing partial copies.
 
     Normal creator files are copied so later edits cannot change an existing
     project's source by modifying the original. Disposable API/Firebase staging
@@ -109,9 +109,20 @@ def copy_local_source(
             os.link(src, out)
             return out
         except OSError:
-            pass
-    shutil.copy2(src, out)
-    return out
+            out.unlink(missing_ok=True)
+
+    temp = out.with_name(f"{out.stem}.part{out.suffix}")
+    temp.unlink(missing_ok=True)
+    try:
+        shutil.copy2(src, temp)
+        if not temp.is_file() or temp.stat().st_size != src.stat().st_size:
+            raise MediaError(f"Source copy was incomplete: {src}")
+        os.replace(temp, out)
+        return out
+    except Exception:
+        temp.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+        raise
 
 
 def download_owned_social_source(
