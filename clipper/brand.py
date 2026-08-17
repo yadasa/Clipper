@@ -30,12 +30,20 @@ def _valid_color(value: str, fallback: str) -> str:
     return value if _HEX.match(str(value or "")) else fallback
 
 
+def _safe_ass_font(value: str) -> str:
+    # ASS style definitions are comma-separated, so commas/newlines in an
+    # externally supplied font name would corrupt the style record.
+    cleaned = re.sub(r"[\r\n,]+", " ", str(value or "Arial"))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return (cleaned or "Arial")[:120]
+
+
 def normalize_brand(data: dict | None) -> BrandKit:
     """Validate style values without resolving project-relative asset paths."""
     data = dict(data or {})
     kit = BrandKit(
         name=str(data.get("name") or "default")[:80],
-        font=str(data.get("font") or "Arial")[:120],
+        font=_safe_ass_font(str(data.get("font") or "Arial")),
         primary_text=_valid_color(str(data.get("primary_text") or "#FFFFFF"), "#FFFFFF"),
         accent=_valid_color(str(data.get("accent") or "#D6A77A"), "#D6A77A"),
         outline=_valid_color(str(data.get("outline") or "#201A16"), "#201A16"),
