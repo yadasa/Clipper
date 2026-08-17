@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .media import probe
+from .models import Word
 
 
 def has_audio(path: str | Path) -> bool:
@@ -21,18 +22,78 @@ def music_input_args(path: str | Path | None) -> list[str]:
     return ["-stream_loop", "-1", "-i", str(music)]
 
 
+def speech_intervals(
+    words: list[Word],
+    *,
+    clip_start: float = 0.0,
+    clip_duration: float | None = None,
+    pad_before: float = 0.10,
+    pad_after: float = 0.18,
+    merge_gap: float = 0.16,
+) -> list[tuple[float, float]]:
+    """Build merged clip-local speech windows from word timestamps.
+
+    Transcript-driven ducking is deterministic, portable across FFmpeg builds,
+    and does not depend on the optional ``sidechaincompress`` filter.
+    """
+    limit = float("inf") if clip_duration is None else max(0.0, float(clip_duration))
+    raw: list[tuple[float, float]] = []
+    for word in words:
+        start = max(0.0, float(word.start) - clip_start - pad_before)
+        end = min(limit, float(word.end) - clip_start + pad_after)
+        if end > start:
+            raw.append((start, end))
+    if not raw:
+        return []
+    raw.sort()
+    merged: list[list[float]] = [[raw[0][0], raw[0][1]]]
+    for start, end in raw[1:]:
+        if start <= merged[-1][1] + merge_gap:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(round(start, 4), round(end, 4)) for start, end in merged]
+
+
+def _duck_expression(
+    intervals: list[tuple[float, float]],
+    normal_gain: float,
+    duck_gain: float,
+) -> str:
+    normal = max(0.0, min(1.0, float(normal_gain)))
+    duck = max(0.0, min(normal, float(duck_gain)))
+    if not intervals:
+        return f"{duck:.4f}"
+    condition = "+".join(f"between(t,{start:.4f},{end:.4f})" for start, end in intervals)
+    return f"if({condition},{duck:.4f},{normal:.4f})"
+
+
 def music_mix_filters(
     music_input_index: int,
     *,
+    speech_words: list[Word] | None = None,
+    clip_start: float = 0.0,
+    clip_duration: float | None = None,
     speech_label: str = "0:a",
     output_label: str = "aout",
     music_gain: float = 0.22,
+    duck_gain: float = 0.065,
 ) -> list[str]:
-    """FFmpeg filters for a subtle music bed that ducks under speech."""
-    gain = max(0.0, min(1.0, float(music_gain)))
+    """Mix a transcript-aware music bed beneath speech.
+
+    Music sits around ``music_gain`` between spoken phrases and drops to
+    ``duck_gain`` during merged word-timestamp windows. The resulting mix is then
+    loudness-normalized for social delivery. This works on stock FFmpeg builds
+    that do not include sidechain compression.
+    """
+    intervals = speech_intervals(
+        list(speech_words or []),
+        clip_start=clip_start,
+        clip_duration=clip_duration,
+    )
+    expression = _duck_expression(intervals, music_gain, duck_gain)
     return [
         f"[{speech_label}]aresample=48000[speech]",
-        f"[{music_input_index}:a]aresample=48000,volume={gain:.4f}[musicbase]",
-        "[musicbase][speech]sidechaincompress=threshold=0.025:ratio=10:attack=15:release=260[ducked]",
+        f"[{music_input_index}:a]aresample=48000,volume='{expression}':eval=frame[ducked]",
         f"[speech][ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,loudnorm=I=-14:TP=-2.0:LRA=11[{output_label}]",
     ]
