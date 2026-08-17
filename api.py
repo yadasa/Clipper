@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from clipper.config import Settings, normalize_ratios
-from clipper.media import is_social_url
+from clipper.media import is_social_url, probe
 from clipper.pipeline import list_projects, process_video, rerender_project
 
 settings = Settings()
@@ -22,7 +22,7 @@ incoming_dir = settings.workdir / "incoming"
 incoming_dir.mkdir(exist_ok=True)
 (settings.workdir / "local_jobs").mkdir(exist_ok=True)
 
-app = FastAPI(title="Clipper Local API", version="0.2.1")
+app = FastAPI(title="Clipper Local API", version="0.2.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5175"],
@@ -86,6 +86,18 @@ def _stage_upload(upload: UploadFile, prefix: str, default_suffix: str = ".bin")
             upload.file.close()
         except Exception:
             pass
+
+
+def _require_media_stream(path: str, stream_type: str, label: str) -> None:
+    """Reject mislabeled/garbled uploads before transcription or rendering starts."""
+    try:
+        info = probe(path)
+    except Exception as exc:
+        raise HTTPException(400, f"{label} is not readable media") from exc
+    streams = info.get("streams") or []
+    if not any(stream.get("codec_type") == stream_type for stream in streams):
+        expected = "video/image" if stream_type == "video" else "audio"
+        raise HTTPException(400, f"{label} does not contain a usable {expected} stream")
 
 
 def _cleanup_staged(paths: list[str]) -> None:
@@ -290,27 +302,32 @@ def process(
         if file is not None:
             source = _stage_upload(file, "primary", ".mp4")
             staged_paths.append(source)
+            _require_media_stream(source, "video", "Primary upload")
 
         cameras: list[str] = []
-        for upload in secondary_files or []:
+        for index, upload in enumerate(secondary_files or [], start=2):
             path = _stage_upload(upload, "camera", ".mp4")
-            cameras.append(path)
             staged_paths.append(path)
+            _require_media_stream(path, "video", f"Camera {index}")
+            cameras.append(path)
 
         audio_path = None
         if external_audio is not None:
             audio_path = _stage_upload(external_audio, "mic", ".wav")
             staged_paths.append(audio_path)
+            _require_media_stream(audio_path, "audio", "External microphone upload")
 
         music_path = None
         if music is not None:
             music_path = _stage_upload(music, "music", ".mp3")
             staged_paths.append(music_path)
+            _require_media_stream(music_path, "audio", "Background music upload")
 
         logo_path = None
         if logo is not None:
             logo_path = _stage_upload(logo, "logo", ".png")
             staged_paths.append(logo_path)
+            _require_media_stream(logo_path, "video", "Logo upload")
 
         job_settings = _build_job_settings(
             smart_cut=smart_cut,
