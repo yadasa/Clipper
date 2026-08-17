@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ffmpeg_utils import DELIVERY, METADATA_SCRUB, audio_encode_args, video_encode_args
@@ -159,13 +161,29 @@ def render_variants(
     *,
     layout_modes: list[str] | None = None,
 ) -> list[RenderedVariant]:
-    """Render aspect-ratio variants and optional alternate edit compositions."""
+    """Render aspect-ratio variants and optional alternate edit compositions.
+
+    Independent FFmpeg jobs can run concurrently. Keep the default conservative
+    (2) so CPU desktops stay responsive and consumer NVENC session limits are not
+    hammered; set RENDER_WORKERS=1 for strictly serial output.
+    """
     modes = layout_modes or ["auto"]
-    variants: list[RenderedVariant] = []
+    specs: list[tuple[str, str, Path]] = []
     for ratio in ratios:
         ratio_dir = ratio.replace(":", "x")
         for mode in modes:
             suffix = "" if mode == "auto" else f"-{mode}"
             path = Path(output_root) / candidate.id / ratio_dir / f"{candidate.id}-{ratio_dir}{suffix}.mp4"
-            variants.append(render_clip(source_path, candidate, transcript_words, cues, path, ratio=ratio, layout_mode=mode))
-    return variants
+            specs.append((ratio, mode, path))
+
+    workers = max(1, int(os.getenv("RENDER_WORKERS", "2")))
+    workers = min(workers, len(specs)) if specs else 1
+
+    def run(spec: tuple[str, str, Path]) -> RenderedVariant:
+        ratio, mode, path = spec
+        return render_clip(source_path, candidate, transcript_words, cues, path, ratio=ratio, layout_mode=mode)
+
+    if workers == 1:
+        return [run(spec) for spec in specs]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(run, specs))
