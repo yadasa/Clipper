@@ -6,7 +6,7 @@ Clipper treats B-roll as a planned semantic edit decision followed by asset reso
 
 1. `clipper.analysis.plan_visual_cues()` turns the selected clip transcript into non-overlapping semantic cue windows.
 2. `clipper.visuals.resolve_visuals()` delegates to `clipper.broll.resolve_broll()`.
-3. The B-roll resolver walks the configured provider order and chooses the first sufficiently relevant asset.
+3. The B-roll resolver walks the configured provider order and chooses the first sufficiently relevant, not-already-used asset.
 4. The selected asset is materialized into the project and its provider/provenance metadata is stored on `VisualCue`.
 5. `clipper.render.align_visual_cues()` matches the cue transcript back to word timestamps and snaps the visual window to the words it describes.
 6. The renderer composes the asset as split-screen, PIP, or full-screen interruption.
@@ -58,23 +58,35 @@ The library is indexed once per resolver instance. The selected file is hard-lin
 
 Pexels is an optional stock-video source enabled by `PEXELS_API_KEY`. Clipper requests video search results, prefers practical delivery resolutions rather than blindly downloading 4K, caches the search response, downloads the selected MP4 into the shared B-roll cache, then materializes the file into the project.
 
-Provider/source/creator metadata is retained on the cue.
+Pexels video search does not expose rich text tags for every hit, so relevance uses the provider's ordered search rank as semantic evidence and clip duration only as a secondary fitness signal. It no longer assigns every returned video a fixed relevance score.
+
+Provider/source/creator/search-query metadata is retained on the cue.
 
 ### Pixabay
 
 Pixabay is an optional stock-video source enabled by `PIXABAY_API_KEY`. Search uses safe-search and cached API responses. Clipper prefers the medium stream before larger files, retains tags/source/creator metadata, and materializes the selected video into the project.
 
+Pixabay relevance is based primarily on overlap between the cue query and the hit's tags, with a small search-rank contribution. Duration can break ties, but it cannot make a semantically unrelated result pass the relevance gate by itself.
+
 ### Wikimedia Commons
 
-Commons remains the zero-key image fallback. Images are cached globally by query and attribution metadata stays beside the selected file.
+Commons remains the zero-key image fallback. Images are cached globally by query and attribution metadata stays beside the selected file. Search position is weak evidence by itself; the returned file title must have enough query agreement to pass the normal relevance threshold.
 
 ### Local Diffusers
 
 If `DIFFUSION_MODEL` is configured, Clipper can generate a still image locally as the final fallback. Generated assets are cached by model + prompt + generation settings.
 
+## Relevance and repeat avoidance
+
+`BROLL_MIN_RELEVANCE` is a real rejection gate rather than a cosmetic score. Providers may use different evidence because their APIs expose different metadata, but duration/quality fitness does not automatically promote an unrelated result above the threshold.
+
+Within a single clip, Clipper also tracks exact asset identity. It prefers source URL identity when available and otherwise uses a copy-stable content fingerprint. If a later automatic cue resolves to the exact same cutaway, that candidate is rejected and the resolver continues down the provider waterfall. Manual choices are preserved and also count as already-used media for later automatic cues.
+
+This is intentionally narrower than perceptual near-duplicate detection. Detecting different files that show essentially the same shot remains on the next-implementation checklist.
+
 ## Timing
 
-Planner timing is based on sentence/phrase structure. When actual word timestamps are available at render time, the renderer matches the cue transcript back to the clip words and snaps the cue to that phrase.
+Planner timing is based on sentence/phrase structure. When actual word timestamps are available, the pipeline matches the cue transcript back to the clip words and snaps the cue to that phrase before asset resolution. Variant rendering receives those already-aligned cues, so multiple aspect-ratio/layout renders do not repeatedly run fuzzy transcript matching.
 
 This prevents the common failure mode where an otherwise relevant stock shot appears several seconds before or after the sentence it is supposed to illustrate.
 
@@ -97,6 +109,7 @@ This prevents the common failure mode where an otherwise relevant stock shot app
 - Downloads are bounded by `BROLL_MAX_DOWNLOAD_MB` and use atomic `.part` writes.
 - A failed provider does not fail the edit; the resolver logs the failure and advances to the next configured source.
 - A manual cue asset is never replaced by automatic resolution.
+- Exact duplicate assets are rejected within a clip.
 
 ## Configuration
 
@@ -139,4 +152,4 @@ A provider must return project-usable media plus media type, provider name, sour
 
 ## Remaining work
 
-The next high-value B-roll improvements are intentionally listed in `NEXT_IMPLEMENTATION_CHECKLIST.md`: visual embedding reranking, quality rejection, duplicate detection, timeline replace/disable controls, provider credit UI, personal library management, and deterministic motion treatment for stills.
+The next high-value B-roll improvements are intentionally listed in `NEXT_IMPLEMENTATION_CHECKLIST.md`: embedding-based semantic reranking, perceptual near-duplicate detection, visual-quality rejection, timeline replace/disable controls, provider credit UI, personal library management, and deterministic motion treatment for stills.
