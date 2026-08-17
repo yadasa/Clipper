@@ -12,7 +12,7 @@ from .cache import StageCache, file_fingerprint, stable_hash
 from .config import Settings, normalize_ratios
 from .edit_plan import candidate_from_plan, generate_edit_plan, load_edit_plan, save_edit_plan
 from .hooks import generate_hook
-from .media import ingest
+from .media import duration as media_duration, ingest
 from .metadata import extract_thumbnail, generate_social_metadata
 from .models import ClipCandidate, ProjectManifest, RenderedVariant, Transcript, Word
 from .motion import apply_punch_ins, plan_punch_ins
@@ -24,7 +24,7 @@ from .transcript_io import load_transcript, save_transcript, transcript_from_dic
 from .transcription import transcribe
 from .visuals import resolve_visuals
 
-RENDER_CACHE_SCHEMA = 4
+RENDER_CACHE_SCHEMA = 5
 PREPARED_CACHE_SCHEMA = 2
 
 
@@ -74,6 +74,31 @@ def _candidate_with_current_text(candidate: ClipCandidate, words: list[Word]) ->
         title=candidate.title,
         reason=candidate.reason,
         transcript=text,
+        metrics=dict(candidate.metrics),
+    )
+
+
+def _clamp_candidate_to_media(candidate: ClipCandidate, source_duration: float) -> ClipCandidate:
+    """Keep edited clip ranges inside the actual render source timeline."""
+    if source_duration <= 0:
+        return candidate
+    start = max(0.0, min(float(candidate.start), source_duration))
+    end = max(0.0, min(float(candidate.end), source_duration))
+    if end - start < 0.05:
+        raise ValueError(
+            f"Clip {candidate.id!r} is outside the render source ({source_duration:.3f}s): "
+            f"{candidate.start:.3f}..{candidate.end:.3f}"
+        )
+    if abs(start - candidate.start) < 0.001 and abs(end - candidate.end) < 0.001:
+        return candidate
+    return ClipCandidate(
+        id=candidate.id,
+        start=start,
+        end=end,
+        score=candidate.score,
+        title=candidate.title,
+        reason=candidate.reason,
+        transcript=candidate.transcript,
         metrics=dict(candidate.metrics),
     )
 
@@ -168,8 +193,6 @@ def _prepare_candidate(
         else:
             source = punch_path
         if source != punch_path or not punch_path.is_file():
-            # Motion analysis is optional. If it cannot be applied safely, render
-            # the prepared clip without claiming a punch-in that never happened.
             source = cut_path
             punch_dicts = []
 
@@ -274,11 +297,13 @@ def _render_plan(
     brand.logo_path = _resolve_project_asset(brand.logo_path, root)
     music_path = _resolve_project_asset(plan.get("music_path"), root)
     finished: list[dict] = []
+    source_duration = media_duration(render_source)
 
     for item in plan.get("clips") or []:
         if not item.get("enabled", True):
             continue
-        candidate = _candidate_with_current_text(candidate_from_plan(item), transcript.words)
+        candidate = _clamp_candidate_to_media(candidate_from_plan(item), source_duration)
+        candidate = _candidate_with_current_text(candidate, transcript.words)
         source, local_candidate, words, intervals, punch_events = _prepare_candidate(
             render_source,
             candidate,
@@ -291,9 +316,6 @@ def _render_plan(
         if item.get("hook_overlay", True):
             hook_text = str(item.get("hook_text") or "").strip() or generate_hook(local_candidate, settings)
 
-        # Plan on the actual render timeline, then snap once against the exact
-        # words before asset resolution. Rendering receives already-aligned cues
-        # so each ratio/layout does not repeat fuzzy transcript matching.
         cues = plan_visual_cues(local_candidate, settings, words=words)
         cues = align_visual_cues(cues, words, local_candidate)
         cues = resolve_visuals(cues, root / "visuals" / candidate.id, settings)
@@ -374,6 +396,7 @@ def process_video(
     secondary_cameras: list[str] | None = None,
     external_audio: str | None = None,
     alternate_visual_layouts: bool = False,
+    prefer_hardlink_ingest: bool = False,
 ) -> ProjectManifest:
     settings = settings or Settings()
     settings.ensure_dirs()
@@ -398,7 +421,12 @@ def process_video(
     _dump_json(manifest_path, manifest.to_dict())
 
     try:
-        primary = ingest(source, source_dir, own_content_ack=own_content_ack)
+        primary = ingest(
+            source,
+            source_dir,
+            own_content_ack=own_content_ack,
+            prefer_hardlink=prefer_hardlink_ingest,
+        )
         manifest.source_path = str(primary)
         manifest.source_name = primary.name
         manifest.status = "transcribing"
@@ -411,7 +439,12 @@ def process_video(
 
         working_primary = primary
         if external_audio:
-            audio_path = ingest(external_audio, root / "external_audio", own_content_ack=own_content_ack)
+            audio_path = ingest(
+                external_audio,
+                root / "external_audio",
+                own_content_ack=own_content_ack,
+                prefer_hardlink=prefer_hardlink_ingest,
+            )
             audio_transcript = _cached_transcribe(audio_path, settings, cache)
             sync = estimate_sync(primary, audio_path, primary_transcript, audio_transcript)
             _dump_json(root / "sync" / "external_audio.json", asdict(sync))
@@ -423,7 +456,12 @@ def process_video(
 
         synced_cameras = []
         for index, secondary in enumerate(secondary_cameras or []):
-            sec_path = ingest(secondary, root / "cameras" / f"camera_{index + 2}", own_content_ack=own_content_ack)
+            sec_path = ingest(
+                secondary,
+                root / "cameras" / f"camera_{index + 2}",
+                own_content_ack=own_content_ack,
+                prefer_hardlink=prefer_hardlink_ingest,
+            )
             sec_transcript = _cached_transcribe(sec_path, settings, cache)
             sync = estimate_sync(primary, sec_path, primary_transcript, sec_transcript)
             _dump_json(root / "sync" / f"camera_{index + 2}.json", asdict(sync))
