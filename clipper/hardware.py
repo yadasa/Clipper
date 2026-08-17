@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,12 +61,7 @@ def _nvenc_available() -> bool:
 
 
 def detect_hardware_profile() -> HardwareProfile:
-    """Return conservative automatic defaults for the current workstation.
-
-    RTX A4000 has enough VRAM for faster-whisper large-v3 in float16 while still
-    leaving useful headroom for NVENC and ordinary editing. Explicit environment
-    variables always win later in ``apply_profile_defaults``.
-    """
+    """Return conservative automatic defaults for the current workstation."""
     gpu_name, vram = _nvidia_info()
     cuda = _cuda_available()
     nvenc = _nvenc_available() if gpu_name else False
@@ -121,17 +116,27 @@ def detect_hardware_profile() -> HardwareProfile:
     )
 
 
+def _explicit(name: str) -> bool:
+    """Treat an empty .env assignment as unset so auto-tuning still works."""
+    return bool(os.environ.get(name, "").strip())
+
+
 def apply_profile_defaults(settings, profile: HardwareProfile | None = None):
-    """Mutate a Settings instance only for values the user did not explicitly set."""
+    """Mutate Settings only for values the user did not explicitly configure.
+
+    Blank values in ``.env`` are intentionally considered unset. This matters for
+    the recommended template, where users may leave GPU tuning fields empty and
+    let an RTX A4000 profile choose large-v3/CUDA/NVENC automatically.
+    """
     profile = profile or detect_hardware_profile()
-    if "WHISPER_MODEL" not in os.environ:
+    if not _explicit("WHISPER_MODEL"):
         settings.whisper_model = profile.whisper_model
-    if "WHISPER_BATCH_SIZE" not in os.environ:
+    if not _explicit("WHISPER_BATCH_SIZE"):
         settings.whisper_batch_size = profile.whisper_batch_size
-    if "WHISPER_DEVICE" not in os.environ:
+    if not _explicit("WHISPER_DEVICE"):
         settings.whisper_device = "cuda" if profile.cuda else "cpu"
-    if "FFMPEG_ENCODER" not in os.environ:
+    if not _explicit("FFMPEG_ENCODER"):
         os.environ["FFMPEG_ENCODER"] = profile.encoder
-    if "RENDER_WORKERS" not in os.environ:
+    if not _explicit("RENDER_WORKERS"):
         os.environ["RENDER_WORKERS"] = str(profile.render_workers)
     return profile
