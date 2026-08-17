@@ -4,10 +4,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from clipper.automation import build_clean_master, choose_authoritative_audio, measure_audio_quality
 from clipper.brand import BrandKit
+from clipper.config import Settings
 from clipper.models import ClipCandidate, Segment, SyncMap, Transcript, VisualCue, Word
 from clipper.motion import PunchIn, apply_punch_ins
 from clipper.multicam import build_multicam_master, replace_audio_with_synced_track
+from clipper.quality import check_render
 from clipper.render import render_clip
 from clipper.smartcut import KeepInterval, build_keep_intervals, compact_duration, prepare_compacted_clip, remap_words
 
@@ -101,6 +104,41 @@ def main() -> int:
             Word("because", 2.45, 2.65),
             Word("works.", 2.72, 2.98),
         ]
+        transcript = Transcript(
+            candidate.transcript,
+            "en",
+            3.2,
+            [Segment(0.05, 2.98, candidate.transcript, words)],
+        )
+
+        # Auto-mode primitives: audio inspection + one global clean master before
+        # any short-form candidate selection.
+        primary_quality = measure_audio_quality(source, seconds=5)
+        mic_quality = measure_audio_quality(mic, seconds=5)
+        assert primary_quality.score > 0
+        assert mic_quality.score > 0
+        selected_audio, audio_decision = choose_authoritative_audio(source, mic)
+        assert Path(selected_audio) in {source, mic}
+        assert audio_decision["selected"] in {"primary", "external"}
+        auto_settings = Settings(
+            workdir=root / "auto-data",
+            auto_global_cleanup=True,
+            smart_cut=True,
+            remove_fillers=True,
+            auto_cleanup_max_removed_ratio=0.58,
+        )
+        clean_master = root / "auto-clean-master.mp4"
+        clean_source, clean_transcript, clean_edl = build_clean_master(
+            source,
+            transcript,
+            clean_master,
+            auto_settings,
+        )
+        assert Path(clean_source).is_file()
+        assert clean_transcript.duration <= transcript.duration
+        assert clean_edl
+        assert_video(Path(clean_source), width=640, height=360)
+
         intervals = build_keep_intervals(
             candidate,
             words,
@@ -145,7 +183,7 @@ def main() -> int:
             )
         ]
         output = root / "final.mp4"
-        render_clip(
+        rendered = render_clip(
             motion,
             local,
             mapped,
@@ -157,6 +195,8 @@ def main() -> int:
             music_path=str(music),
         )
         assert_video(output, width=1080, height=1920)
+        delivery_check = check_render(rendered, expected_duration=local.duration, expect_audio=True)
+        assert delivery_check.ok, delivery_check.problems
 
         silent_cut = root / "silent-cut.mp4"
         prepare_compacted_clip(
@@ -218,7 +258,7 @@ def main() -> int:
         )
         assert_video(multicam, width=320, height=180)
 
-        print("Clipper FFmpeg feature smoke passed.")
+        print("Clipper FFmpeg + auto-mode feature smoke passed.")
     return 0
 
 
