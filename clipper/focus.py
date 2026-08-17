@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 _cache_lock = threading.Lock()
-_cache: dict[tuple[str, float, float], list[tuple[float, float]]] = {}
+_CACHE_LIMIT = 64
+_cache: OrderedDict[tuple[str, int, int, float, float, float, int], list[tuple[float, float]]] = OrderedDict()
 
 
 def _video_size(source_path: str | Path) -> tuple[int, int]:
@@ -39,6 +41,50 @@ def _read_exact(stream, size: int) -> bytes:
     return b"".join(chunks)
 
 
+def _cache_key(
+    source_path: str | Path,
+    start: float,
+    end: float,
+    sample_hz: float,
+    analysis_width: int,
+) -> tuple[str, int, int, float, float, float, int] | None:
+    path = Path(source_path).expanduser().resolve()
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        str(path),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        round(float(start), 3),
+        round(float(end), 3),
+        round(float(sample_hz), 3),
+        int(analysis_width),
+    )
+
+
+def _cache_get(key):
+    if key is None:
+        return None
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is None:
+            return None
+        _cache.move_to_end(key)
+        return list(cached)
+
+
+def _cache_put(key, points: list[tuple[float, float]]) -> None:
+    if key is None:
+        return
+    with _cache_lock:
+        _cache[key] = list(points)
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_LIMIT:
+            _cache.popitem(last=False)
+
+
 def track_face_centers(
     source_path: str | Path,
     start: float,
@@ -55,11 +101,10 @@ def track_face_centers(
     plus exponential smoothing keeps background faces from making the crop whip.
     Failure is intentionally soft so callers can fall back to a center crop.
     """
-    key = (str(Path(source_path).resolve()), round(float(start), 3), round(float(end), 3))
-    with _cache_lock:
-        cached = _cache.get(key)
+    key = _cache_key(source_path, start, end, sample_hz, analysis_width)
+    cached = _cache_get(key)
     if cached is not None:
-        return list(cached)
+        return cached
 
     try:
         import mediapipe as mp
@@ -91,7 +136,12 @@ def track_face_centers(
         "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
     ]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 2)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=frame_bytes * 2,
+        )
     except Exception:
         return []
     if proc.stdout is None:
@@ -139,8 +189,7 @@ def track_face_centers(
     for t, x in points:
         if not compact or abs(x - compact[-1][1]) >= 0.008 or t - compact[-1][0] >= 1.0:
             compact.append((t, x))
-    with _cache_lock:
-        _cache[key] = list(compact)
+    _cache_put(key, compact)
     return compact
 
 
