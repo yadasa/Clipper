@@ -5,21 +5,53 @@ import json
 from pathlib import Path
 
 from .config import Settings
-from .pipeline import process_video
+from .hardware import detect_hardware_profile
+from .pipeline import process_video, rerender_project
 from .publish import PREFERRED_RATIO, UploadPostPublisher
 from .worker import main as worker_main
 
 
+def _settings_from_args(args) -> Settings:
+    settings = Settings()
+    if getattr(args, "brand", None):
+        settings.brand_kit_path = args.brand
+    if getattr(args, "music", None):
+        settings.music_path = args.music
+    if getattr(args, "no_smart_cut", False):
+        settings.smart_cut = False
+    if getattr(args, "keep_fillers", False):
+        settings.remove_fillers = False
+    if getattr(args, "no_punch_ins", False):
+        settings.punch_ins = False
+    if getattr(args, "no_hook", False):
+        settings.hook_overlay = False
+    if getattr(args, "no_cache", False):
+        settings.stage_cache = False
+    return settings
+
+
 def _process(args) -> None:
+    settings = _settings_from_args(args)
     manifest = process_video(
         args.source,
         ratios=args.ratio,
         own_content_ack=args.own_content,
         secondary_cameras=args.camera,
         external_audio=args.mic,
-        alternate_visual_layouts=not args.no_alternates,
+        alternate_visual_layouts=bool(args.alternates and not args.no_alternates),
+        settings=settings,
     )
     print(json.dumps(manifest.to_dict(), indent=2))
+
+
+def _rerender(args) -> None:
+    settings = _settings_from_args(args)
+    manifest = rerender_project(args.project, settings=settings)
+    print(json.dumps(manifest.to_dict(), indent=2))
+
+
+def _profile(_args) -> None:
+    print(json.dumps(detect_hardware_profile().to_dict(), indent=2))
 
 
 def _publish(args) -> None:
@@ -28,6 +60,7 @@ def _publish(args) -> None:
     platforms = [p.lower() for p in args.platform]
     for clip in data.get("clips", []):
         candidate = clip.get("candidate", {})
+        metadata = clip.get("social_metadata") or {}
         variants = clip.get("variants", [])
         groups: dict[str, list[str]] = {}
         for platform in platforms:
@@ -38,13 +71,25 @@ def _publish(args) -> None:
             variant = (matches or variants or [None])[0]
             if not variant:
                 continue
+            description = args.description or metadata.get("caption", "")
             result = publisher.upload_video(
-                variant["path"], group,
-                title=args.title or candidate.get("title", ""),
-                description=args.description,
+                variant["path"],
+                group,
+                title=args.title or metadata.get("title") or candidate.get("title", ""),
+                description=description,
                 add_to_queue=args.queue,
             )
             print(json.dumps({"clip": candidate.get("id"), "platforms": group, "result": result}, indent=2))
+
+
+def _add_edit_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--brand", help="Path to brand-kit JSON")
+    parser.add_argument("--music", help="Optional background music file")
+    parser.add_argument("--no-smart-cut", action="store_true", help="Do not tighten pauses")
+    parser.add_argument("--keep-fillers", action="store_true", help="Keep filler words even when a clean cut is available")
+    parser.add_argument("--no-punch-ins", action="store_true", help="Disable automatic emphasis zooms")
+    parser.add_argument("--no-hook", action="store_true", help="Disable opening hook title overlay")
+    parser.add_argument("--no-cache", action="store_true", help="Disable stage/render cache for this run")
 
 
 def main() -> None:
@@ -57,8 +102,18 @@ def main() -> None:
     process.add_argument("--camera", action="append", default=[], help="Additional synced camera recording; repeatable")
     process.add_argument("--mic", help="Separate microphone/audio recording")
     process.add_argument("--own-content", action="store_true", help="Confirm ownership/permission for a social URL")
-    process.add_argument("--no-alternates", action="store_true", help="Render only the automatic visual composition")
+    process.add_argument("--alternates", action="store_true", help="Also render split/PIP/interruption alternatives")
+    process.add_argument("--no-alternates", action="store_true", help=argparse.SUPPRESS)
+    _add_edit_options(process)
     process.set_defaults(func=_process)
+
+    rerender = sub.add_parser("rerender", help="Rerender an existing project's edit_plan.json without retranscribing")
+    rerender.add_argument("project", help="Project directory or manifest.json path")
+    _add_edit_options(rerender)
+    rerender.set_defaults(func=_rerender)
+
+    profile = sub.add_parser("profile", help="Show the detected local hardware tuning profile")
+    profile.set_defaults(func=_profile)
 
     publish = sub.add_parser("publish", help="Publish rendered clips through configured Upload-Post account")
     publish.add_argument("manifest")
@@ -74,7 +129,6 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "worker":
-        # Rebuild argv so the worker module can keep a tiny standalone parser too.
         import sys
         sys.argv = [sys.argv[0]] + (["--once"] if args.once else [])
         worker_main()
