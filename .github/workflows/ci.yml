@@ -159,8 +159,10 @@ jobs:
 
   a4000-gpu-smoke:
     name: NVIDIA A4000 CTranslate2 CUDA + NVENC smoke
-    if: ${{ vars.A4000_RUNNER_ENABLED == 'true' }}
-    runs-on: [self-hosted, windows, x64, a4000]
+    # Never execute pull-request code on the user's home PC. The self-hosted
+    # workstation is restricted to trusted main-branch pushes or manual runs.
+    if: ${{ vars.A4000_RUNNER_ENABLED == 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: [self-hosted, Windows, X64, a4000]
     timeout-minutes: 15
     needs: quality
     env:
