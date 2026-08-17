@@ -1,8 +1,22 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    match /users/{userId}/{allPaths=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    function owns(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Clients may upload/delete only their own source inbox objects. The trusted
+    // desktop worker uses the Admin SDK and therefore is not constrained by rules.
+    match /users/{userId}/sources/{jobId}/{allPaths=**} {
+      allow read, write: if owns(userId);
+    }
+
+    // Finished renders, thumbnails, edit plans, and future worker-generated
+    // project artifacts are read-only to the browser so they cannot be spoofed
+    // or overwritten after the worker publishes them.
+    match /users/{userId}/projects/{projectId}/{allPaths=**} {
+      allow read: if owns(userId);
+      allow write: if false;
     }
   }
 }
