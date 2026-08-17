@@ -5,9 +5,10 @@ import threading
 
 import pytest
 
+from clipper.config import Settings
 from clipper.media import MediaError, _probe_cached, download_owned_social_source, is_social_url, probe
 from clipper.models import ClipCandidate, RenderedVariant, VisualCue, Word
-from clipper.pipeline import _prepare_candidate
+from clipper.pipeline import _clamp_candidate_to_media, _is_disposable_staged_input, _prepare_candidate
 from clipper.render import render_variants
 from clipper.smartcut import build_keep_intervals
 
@@ -46,6 +47,29 @@ def test_probe_cache_avoids_repeated_ffprobe_and_invalidates_replaced_file(tmp_p
     media.write_bytes(b"v2-with-a-different-size")
     assert probe(media)["streams"][0]["width"] == 640
     assert len(calls) == 2
+
+
+def test_api_and_firebase_staging_paths_are_hardlink_eligible(tmp_path: Path):
+    settings = Settings(workdir=tmp_path / "data")
+    incoming = settings.workdir / "incoming" / "primary.mp4"
+    firebase = settings.workdir / "firebase_inbox" / "job" / "source" / "input.mp4"
+    outside = tmp_path / "creator-original.mp4"
+
+    assert _is_disposable_staged_input(str(incoming), settings)
+    assert _is_disposable_staged_input(str(firebase), settings)
+    assert not _is_disposable_staged_input(str(outside), settings)
+    assert not _is_disposable_staged_input("https://www.instagram.com/reel/example", settings)
+
+
+def test_edited_clip_range_is_clamped_to_real_media_duration():
+    candidate = ClipCandidate("c", -2.0, 14.0, 80, "x")
+    clamped = _clamp_candidate_to_media(candidate, 10.0)
+    assert clamped.start == 0.0
+    assert clamped.end == 10.0
+
+    invalid = ClipCandidate("bad", 12.0, 15.0, 80, "x")
+    with pytest.raises(ValueError, match="outside the render source"):
+        _clamp_candidate_to_media(invalid, 10.0)
 
 
 def test_ambiguous_words_are_not_deleted_as_fillers():
