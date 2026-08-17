@@ -1,0 +1,15 @@
+fastapi==0.136.1
+uvicorn==0.46.0
+python-multipart==0.0.27
+httpx==0.28.1
+python-dotenv==1.2.2
+numpy>=2.0,<3
+Pillow==12.2.0
+yt-dlp
+faster-whisper==1.2.1
+google-genai==1.75.0
+firebase-admin>=7.0,<8
+scenedetect==0.7
+ultralytics==8.4.46
+mediapipe==0.10.14
+tqdm==4.67.3
