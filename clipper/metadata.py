@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections import Counter
@@ -98,25 +99,34 @@ def generate_social_metadata(candidate: ClipCandidate, settings: Settings | None
 
 
 def extract_thumbnail(video_path: str | Path, output_path: str | Path, *, fraction: float = 0.32) -> Path:
-    """Extract a representative high-quality JPEG from a finished variant."""
+    """Extract a representative high-quality JPEG from a finished variant atomically."""
     source = Path(video_path)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        probe = subprocess.run(
+        probe_result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(source)],
             check=True,
             capture_output=True,
             text=True,
             timeout=15,
         )
-        duration = max(0.1, float(probe.stdout.strip() or 0.1))
+        duration = max(0.1, float(probe_result.stdout.strip() or 0.1))
     except Exception:
         duration = 1.0
     timestamp = max(0.0, min(duration - 0.05, duration * max(0.05, min(0.9, fraction))))
+    temp = out.with_name(f"{out.stem}.part{out.suffix or '.jpg'}")
+    temp.unlink(missing_ok=True)
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
-        "-i", str(source), "-frames:v", "1", "-q:v", "2", str(out),
+        "-i", str(source), "-frames:v", "1", "-q:v", "2", str(temp),
     ]
-    subprocess.run(cmd, check=True)
-    return out
+    try:
+        subprocess.run(cmd, check=True, timeout=60)
+        if not temp.is_file() or temp.stat().st_size <= 0:
+            raise RuntimeError("Thumbnail extraction produced no output")
+        os.replace(temp, out)
+        return out
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
