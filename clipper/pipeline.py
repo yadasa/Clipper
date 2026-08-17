@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -36,7 +35,7 @@ def process_video(
     settings: Settings | None = None,
     secondary_cameras: list[str] | None = None,
     external_audio: str | None = None,
-    alternate_visual_layouts: bool = True,
+    alternate_visual_layouts: bool = False,
 ) -> ProjectManifest:
     settings = settings or Settings()
     settings.ensure_dirs()
