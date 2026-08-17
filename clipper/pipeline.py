@@ -24,7 +24,8 @@ from .transcript_io import load_transcript, save_transcript, transcript_from_dic
 from .transcription import transcribe
 from .visuals import resolve_visuals
 
-RENDER_CACHE_SCHEMA = 3
+RENDER_CACHE_SCHEMA = 4
+PREPARED_CACHE_SCHEMA = 2
 
 
 def _dump_json(path: Path, value) -> None:
@@ -59,7 +60,7 @@ def _cached_transcribe(path: str | Path, settings: Settings, cache: StageCache) 
 
 
 def _absolute_words(words: list[Word], candidate: ClipCandidate) -> list[Word]:
-    return [w for w in words if w.end > candidate.start and w.start < candidate.end]
+    return [word for word in words if word.end > candidate.start and word.start < candidate.end]
 
 
 def _candidate_with_current_text(candidate: ClipCandidate, words: list[Word]) -> ClipCandidate:
@@ -77,38 +78,21 @@ def _candidate_with_current_text(candidate: ClipCandidate, words: list[Word]) ->
     )
 
 
-def _prepare_candidate(
-    render_source: Path,
+def _intervals_change_timeline(candidate: ClipCandidate, intervals: list[KeepInterval]) -> bool:
+    if len(intervals) != 1:
+        return True
+    interval = intervals[0]
+    return (
+        abs(interval.start - candidate.start) > 0.001
+        or abs(interval.end - candidate.end) > 0.001
+    )
+
+
+def _local_candidate_state(
     candidate: ClipCandidate,
     transcript_words: list[Word],
-    item: dict,
-    root: Path,
-) -> tuple[Path, ClipCandidate, list[Word], list[dict], list[dict]]:
-    """Apply jump cuts and emphasis motion, returning a clip-local timeline."""
-    smart_cut = bool(item.get("smart_cut", True))
-    punch_enabled = bool(item.get("punch_ins", True))
-    remove_fillers = bool(item.get("remove_fillers", True))
-
-    if smart_cut:
-        intervals = build_keep_intervals(candidate, transcript_words, remove_fillers=remove_fillers)
-    else:
-        intervals = [KeepInterval(candidate.start, candidate.end)]
-
-    interval_dicts = [asdict(interval) for interval in intervals]
-    needs_intermediate = smart_cut or punch_enabled
-    if not needs_intermediate:
-        return render_source, candidate, transcript_words, interval_dicts, []
-
-    prepared_dir = root / "prepared" / candidate.id
-    prepared_dir.mkdir(parents=True, exist_ok=True)
-    cut_signature = stable_hash({
-        "source": file_fingerprint(render_source),
-        "intervals": interval_dicts,
-    })[:20]
-    cut_path = prepared_dir / f"smartcut-{cut_signature}.mp4"
-    if not cut_path.is_file() or cut_path.stat().st_size < 10_000:
-        prepare_compacted_clip(render_source, intervals, cut_path)
-
+    intervals: list[KeepInterval],
+) -> tuple[ClipCandidate, list[Word]]:
     mapped = remap_words(transcript_words, intervals)
     duration = compact_duration(intervals)
     text = " ".join(word.text for word in mapped).strip() or candidate.transcript
@@ -122,20 +106,73 @@ def _prepare_candidate(
         transcript=text,
         metrics=dict(candidate.metrics),
     )
+    return local_candidate, mapped
+
+
+def _prepare_candidate(
+    render_source: Path,
+    candidate: ClipCandidate,
+    transcript_words: list[Word],
+    item: dict,
+    root: Path,
+) -> tuple[Path, ClipCandidate, list[Word], list[dict], list[dict]]:
+    """Apply jump cuts and emphasis motion, returning the correct render timeline.
+
+    No intermediate is encoded unless the EDL actually removes time or a punch-in
+    is actually scheduled. This avoids an unnecessary full clip encode for the
+    common case where smart-cut analysis decides the original clip is already
+    clean enough.
+    """
+    smart_cut = bool(item.get("smart_cut", True))
+    punch_enabled = bool(item.get("punch_ins", True))
+    remove_fillers = bool(item.get("remove_fillers", True))
+
+    if smart_cut:
+        intervals = build_keep_intervals(candidate, transcript_words, remove_fillers=remove_fillers)
+    else:
+        intervals = [KeepInterval(candidate.start, candidate.end)]
+
+    interval_dicts = [asdict(interval) for interval in intervals]
+    has_cuts = _intervals_change_timeline(candidate, intervals)
+    if not has_cuts and not punch_enabled:
+        return render_source, candidate, transcript_words, interval_dicts, []
+
+    local_candidate, mapped = _local_candidate_state(candidate, transcript_words, intervals)
+    events = plan_punch_ins(mapped, local_candidate.duration) if punch_enabled else []
+    punch_dicts = [asdict(event) for event in events]
+
+    if not has_cuts and not events:
+        return render_source, candidate, transcript_words, interval_dicts, []
+
+    prepared_dir = root / "prepared" / candidate.id
+    prepared_dir.mkdir(parents=True, exist_ok=True)
+    cut_signature = stable_hash({
+        "schema": PREPARED_CACHE_SCHEMA,
+        "source": file_fingerprint(render_source),
+        "intervals": interval_dicts,
+    })[:20]
+    cut_path = prepared_dir / f"smartcut-{cut_signature}.mp4"
+    if not cut_path.is_file() or cut_path.stat().st_size < 10_000:
+        prepare_compacted_clip(render_source, intervals, cut_path)
+
     source = cut_path
-    punch_dicts: list[dict] = []
-    if punch_enabled:
-        events = plan_punch_ins(mapped, duration)
-        punch_dicts = [asdict(event) for event in events]
-        if events:
-            punch_signature = stable_hash({
-                "cut": cut_signature,
-                "events": punch_dicts,
-            })[:20]
-            punch_path = prepared_dir / f"motion-{punch_signature}.mp4"
-            if not punch_path.is_file() or punch_path.stat().st_size < 10_000:
-                apply_punch_ins(cut_path, events, punch_path)
+    if events:
+        punch_signature = stable_hash({
+            "schema": PREPARED_CACHE_SCHEMA,
+            "cut": cut_signature,
+            "events": punch_dicts,
+        })[:20]
+        punch_path = prepared_dir / f"motion-{punch_signature}.mp4"
+        if not punch_path.is_file() or punch_path.stat().st_size < 10_000:
+            source = Path(apply_punch_ins(cut_path, events, punch_path))
+        else:
             source = punch_path
+        if source != punch_path or not punch_path.is_file():
+            # Motion analysis is optional. If it cannot be applied safely, render
+            # the prepared clip without claiming a punch-in that never happened.
+            source = cut_path
+            punch_dicts = []
+
     return source, local_candidate, mapped, interval_dicts, punch_dicts
 
 
@@ -211,18 +248,18 @@ def _load_cached_variants(path: Path, signature: str) -> list[RenderedVariant] |
 
 
 def _save_cached_variants(path: Path, signature: str, variants: list[RenderedVariant]) -> None:
-    _dump_json(path, {"signature": signature, "variants": [asdict(v) for v in variants]})
+    _dump_json(path, {"signature": signature, "variants": [asdict(variant) for variant in variants]})
 
 
 def _resolve_project_asset(value: str | None, root: Path) -> str | None:
     if not value:
         return None
-    p = Path(value).expanduser()
-    if not p.is_absolute():
-        project_relative = (root / p).resolve()
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        project_relative = (root / path).resolve()
         if project_relative.is_file():
             return str(project_relative)
-    return str(p) if p.is_file() else None
+    return str(path) if path.is_file() else None
 
 
 def _render_plan(
@@ -254,16 +291,20 @@ def _render_plan(
         if item.get("hook_overlay", True):
             hook_text = str(item.get("hook_text") or "").strip() or generate_hook(local_candidate, settings)
 
-        # Plan on the prepared clip timeline, then snap once more against the
-        # exact words before resolving assets. This makes provider search, the
-        # saved timeline, cache identity, and the encoded insertion agree.
+        # Plan on the actual render timeline, then snap once against the exact
+        # words before asset resolution. Rendering receives already-aligned cues
+        # so each ratio/layout does not repeat fuzzy transcript matching.
         cues = plan_visual_cues(local_candidate, settings, words=words)
         cues = align_visual_cues(cues, words, local_candidate)
         cues = resolve_visuals(cues, root / "visuals" / candidate.id, settings)
-        _dump_json(root / "visuals" / candidate.id / "timeline.json", [asdict(c) for c in cues])
+        _dump_json(root / "visuals" / candidate.id / "timeline.json", [asdict(cue) for cue in cues])
 
         ratios = normalize_ratios(item.get("ratios") or manifest.ratios)
-        modes = [m for m in item.get("layout_modes") or ["auto"] if m in {"auto", "split", "pip", "interrupt"}]
+        modes = [
+            mode
+            for mode in item.get("layout_modes") or ["auto"]
+            if mode in {"auto", "split", "pip", "interrupt"}
+        ]
         if not modes:
             modes = ["auto"]
 
@@ -291,6 +332,7 @@ def _render_plan(
                 caption_preset=item.get("caption_preset"),
                 hook_text=hook_text,
                 music_path=music_path,
+                cues_aligned=True,
             )
             if settings.stage_cache:
                 _save_cached_variants(cache_path, signature, variants)
@@ -312,9 +354,9 @@ def _render_plan(
             "smart_cut_intervals": intervals,
             "punch_ins": punch_events,
             "hook_text": hook_text,
-            "visual_cues": [asdict(c) for c in cues],
+            "visual_cues": [asdict(cue) for cue in cues],
             "social_metadata": social_metadata,
-            "variants": [asdict(v) for v in variants],
+            "variants": [asdict(variant) for variant in variants],
         })
         manifest.clips = finished
         _dump_json(root / "manifest.json", manifest.to_dict())
@@ -397,7 +439,7 @@ def process_video(
         manifest.status = "selecting"
         _dump_json(manifest_path, manifest.to_dict())
         candidates = gemini_rerank(rank_clips(primary_transcript, settings), settings)
-        _dump_json(root / "clip_candidates.json", [asdict(c) for c in candidates])
+        _dump_json(root / "clip_candidates.json", [asdict(candidate) for candidate in candidates])
 
         brand = load_brand(settings.brand_kit_path or None)
         plan = generate_edit_plan(
