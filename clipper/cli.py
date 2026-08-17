@@ -14,6 +14,9 @@ from .worker import main as worker_main
 
 def _settings_from_args(args) -> Settings:
     settings = Settings()
+    mode = getattr(args, "mode", None)
+    if mode:
+        settings.automation_mode = mode
     if getattr(args, "brand", None):
         settings.brand_kit_path = args.brand
     if getattr(args, "music", None):
@@ -21,8 +24,6 @@ def _settings_from_args(args) -> Settings:
     caption_preset = getattr(args, "caption_preset", None)
     if caption_preset:
         settings.caption_preset = caption_preset
-        # The default BrandKit is environment-derived when no explicit brand file
-        # exists, so mirror this CLI override for the current process only.
         os.environ["CAPTION_PRESET"] = caption_preset
     if getattr(args, "no_smart_cut", False):
         settings.smart_cut = False
@@ -90,6 +91,12 @@ def _publish(args) -> None:
 
 
 def _add_edit_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mode",
+        choices=["auto", "manual"],
+        default=None,
+        help="auto runs the full sync -> clean -> coherent-select -> edit -> caption -> QA pipeline; manual preserves explicit controls",
+    )
     parser.add_argument("--brand", help="Path to brand-kit JSON")
     parser.add_argument("--music", help="Optional background music file")
     parser.add_argument("--caption-preset", choices=["karaoke", "clean", "minimal"], help="Override caption style when no brand kit supplies one")
