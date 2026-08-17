@@ -1,7 +1,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 import { getFirestore, collection, doc, getDocs, query, setDoc, serverTimestamp, where } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
-import { getStorage, ref, uploadBytesResumable, getDownloadURL } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js';
+import { getStorage, ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -16,6 +16,11 @@ const provider = new GoogleAuthProvider();
 let currentUser = null;
 let sourceMode = 'device';
 const urlCache = new Map();
+const SOCIAL_HOSTS = new Set([
+  'instagram.com','www.instagram.com','tiktok.com','www.tiktok.com','vm.tiktok.com',
+  'youtube.com','www.youtube.com','youtu.be','facebook.com','www.facebook.com',
+  'x.com','www.x.com','twitter.com','www.twitter.com'
+]);
 
 function escapeHtml(value='') { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function timeValue(value) { try { return value?.toMillis?.() || new Date(value || 0).getTime() || 0; } catch { return 0; } }
@@ -27,7 +32,18 @@ function updateQueueButton() {
   const ready = !!currentUser && selectedRatios().length > 0 && (sourceMode==='device' ? !!$('#fileInput').files[0] : !!$('#sourceUrl').value.trim());
   $('#queueButton').disabled = !ready;
 }
-function safeFileName(file) { return file.name.replace(/[^a-zA-Z0-9._-]+/g,'-'); }
+function safeFileName(file) {
+  const cleaned=String(file?.name||'upload').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'');
+  return cleaned.slice(0,180) || 'upload';
+}
+function isSupportedSocialUrl(value) {
+  try {
+    const url=new URL(value);
+    if (!['http:','https:'].includes(url.protocol)) return false;
+    const host=url.hostname.toLowerCase().replace(/\.$/,'');
+    return SOCIAL_HOSTS.has(host) || [...SOCIAL_HOSTS].some(base=>host.endsWith(`.${base}`));
+  } catch { return false; }
+}
 
 $$('.tab').forEach(button => button.addEventListener('click', () => {
   sourceMode = button.dataset.sourceTab;
@@ -82,8 +98,10 @@ async function renderDoneProject(project) {
     const metrics=candidate.metrics || outputs[0]?.metrics || {};
     const metricBits=['hook','clarity','payoff'].filter(k=>metrics[k]!=null).map(k=>`${k} ${Math.round(metrics[k])}`).join(' · ');
     const hook=clipMeta.hookText ? `<div class="fine">Hook: ${escapeHtml(clipMeta.hookText)}</div>` : '';
+    const brollProviders=[...new Set((clipMeta.visualCues||[]).map(cue=>cue.provider).filter(Boolean))];
+    const broll=brollProviders.length ? `<div class="fine">B-roll: ${escapeHtml(brollProviders.join(' · '))}</div>` : '';
     const score=scoreLabel(candidate.score ?? outputs[0]?.score);
-    blocks.push(`<div class="clip-block"><div class="clip-title"><strong>${escapeHtml(outputs[0]?.title || candidate.title || clipId)}</strong><span class="meta">${score ? `${score} · `:''}${outputs.length} version${outputs.length===1?'':'s'}</span></div>${metricBits?`<div class="fine">${escapeHtml(metricBits)}</div>`:''}${hook}<div class="variants">${variants.join('')}</div></div>`);
+    blocks.push(`<div class="clip-block"><div class="clip-title"><strong>${escapeHtml(outputs[0]?.title || candidate.title || clipId)}</strong><span class="meta">${score ? `${score} · `:''}${outputs.length} version${outputs.length===1?'':'s'}</span></div>${metricBits?`<div class="fine">${escapeHtml(metricBits)}</div>`:''}${hook}${broll}<div class="variants">${variants.join('')}</div></div>`);
   }
   const published=(project.publishPlatforms||[]).length ? `<div class="fine" style="margin-top:12px">Publish targets: ${escapeHtml((project.publishPlatforms||[]).join(' · '))}${(project.publishErrors||[]).length ? ` · ${project.publishErrors.length} publish issue${project.publishErrors.length===1?'':'s'}` : ' · submitted'}</div>` : '';
   const errors=(project.publishErrors||[]).length ? `<details class="extras"><summary>Publishing issues</summary><p class="fine">${(project.publishErrors||[]).map(escapeHtml).join('<br>')}</p></details>` : '';
@@ -138,6 +156,10 @@ async function uploadOne(file, storagePath, baseBytes, totalBytes) {
   return storagePath;
 }
 
+async function cleanupUploadedPaths(paths) {
+  await Promise.allSettled(paths.map(path=>deleteObject(ref(storage,path))));
+}
+
 async function queueJob() {
   if (!currentUser) return;
   const ratios=selectedRatios();
@@ -150,6 +172,7 @@ async function queueJob() {
   const logoFile=$('#logoInput').files[0] || null;
   const allUploads=[...(primaryFile?[primaryFile]:[]),...secondaryFiles,...(externalAudio?[externalAudio]:[]),...(musicFile?[musicFile]:[]),...(logoFile?[logoFile]:[])];
   const totalBytes=allUploads.reduce((sum,file)=>sum+file.size,0);
+  const uploadedPaths=[];
   let sent=0;
   const base={
     userId:currentUser.uid,
@@ -178,37 +201,41 @@ async function queueJob() {
     const extras={secondaryStoragePaths:[]};
     if (primaryFile) {
       const path=`users/${currentUser.uid}/sources/${jobRef.id}/${safeFileName(primaryFile)}`;
-      await uploadOne(primaryFile,path,sent,totalBytes); sent+=primaryFile.size;
+      await uploadOne(primaryFile,path,sent,totalBytes); uploadedPaths.push(path); sent+=primaryFile.size;
       base.sourceStoragePath=path; base.sourceName=primaryFile.name; base.ownContentAck=true;
     } else {
       const sourceUrl=$('#sourceUrl').value.trim();
       if(!sourceUrl) throw new Error('Paste a link first.');
+      if(!isSupportedSocialUrl(sourceUrl)) throw new Error('Use a supported Instagram, TikTok, YouTube, Facebook, or X link.');
       if(!$('#ownContentAck').checked) throw new Error('Confirm that you own or are authorized to reuse this social post.');
       base.sourceUrl=sourceUrl; base.sourceName=sourceUrl; base.ownContentAck=true;
     }
     for (let i=0;i<secondaryFiles.length;i++) {
       const file=secondaryFiles[i];
       const path=`users/${currentUser.uid}/sources/${jobRef.id}/camera-${i+2}-${safeFileName(file)}`;
-      extras.secondaryStoragePaths.push(await uploadOne(file,path,sent,totalBytes)); sent+=file.size;
+      extras.secondaryStoragePaths.push(await uploadOne(file,path,sent,totalBytes)); uploadedPaths.push(path); sent+=file.size;
     }
     if (externalAudio) {
       const path=`users/${currentUser.uid}/sources/${jobRef.id}/mic-${safeFileName(externalAudio)}`;
-      extras.externalAudioStoragePath=await uploadOne(externalAudio,path,sent,totalBytes); sent+=externalAudio.size;
+      extras.externalAudioStoragePath=await uploadOne(externalAudio,path,sent,totalBytes); uploadedPaths.push(path); sent+=externalAudio.size;
     }
     if (musicFile) {
       const path=`users/${currentUser.uid}/sources/${jobRef.id}/music-${safeFileName(musicFile)}`;
-      extras.musicStoragePath=await uploadOne(musicFile,path,sent,totalBytes); sent+=musicFile.size;
+      extras.musicStoragePath=await uploadOne(musicFile,path,sent,totalBytes); uploadedPaths.push(path); sent+=musicFile.size;
     }
     if (logoFile) {
       const path=`users/${currentUser.uid}/sources/${jobRef.id}/logo-${safeFileName(logoFile)}`;
-      extras.logoStoragePath=await uploadOne(logoFile,path,sent,totalBytes); sent+=logoFile.size;
+      extras.logoStoragePath=await uploadOne(logoFile,path,sent,totalBytes); uploadedPaths.push(path); sent+=logoFile.size;
     }
     await setDoc(jobRef,{...base,...extras});
     setProgress(totalBytes?100:null); setMessage('Queued. Your home computer will claim it when the worker is online.');
     if(totalBytes) setTimeout(()=>setProgress(null),700);
     await loadProjects();
-  } catch(error) { setProgress(null); setMessage(error.message||String(error),true); }
-  finally { updateQueueButton(); }
+  } catch(error) {
+    setProgress(null);
+    if (uploadedPaths.length) await cleanupUploadedPaths(uploadedPaths);
+    setMessage(error.message||String(error),true);
+  } finally { updateQueueButton(); }
 }
 $('#queueButton').addEventListener('click',queueJob);
 
