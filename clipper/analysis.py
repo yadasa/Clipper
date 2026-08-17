@@ -11,6 +11,23 @@ from .models import ClipCandidate, Transcript, VisualCue
 from .scoring import diverse_top_candidates, score_text
 
 
+def _text_for_range(transcript: Transcript, start: float, end: float, fallback: str) -> str:
+    """Return only transcript words that actually overlap the selected clip.
+
+    Transcript windows are intentionally wider than final social clips. Once a
+    window is capped/snapped, using its original text leaks later speech into
+    scoring, Gemini reranking, hooks, and B-roll planning. Prefer word timestamps
+    whenever they are available so the intelligence layer judges the video the
+    viewer will really see.
+    """
+    selected = [
+        word.text
+        for word in transcript.words
+        if word.end > start and word.start < end and word.text.strip()
+    ]
+    return " ".join(selected).strip() or fallback.strip()
+
+
 def rank_clips(transcript: Transcript, settings: Settings | None = None) -> list[ClipCandidate]:
     settings = settings or Settings()
     payload = transcript.selection_payload()
@@ -23,13 +40,14 @@ def rank_clips(transcript: Transcript, settings: Settings | None = None) -> list
     for index, window in enumerate(windows, 1):
         start = float(window["start"])
         end = float(window["end"])
-        text = str(window["text"]).strip()
+        window_text = str(window["text"]).strip()
         if end - start > 58:
             end = start + 58
         start, end = snap_clip_to_words(
             start, end, words, transcript.duration,
             min_duration=12, max_duration=60,
         )
+        text = _text_for_range(transcript, start, end, window_text)
         metrics = score_text(text, end - start)
         excerpt = " ".join(text.split()[:14])
         scored.append(ClipCandidate(
