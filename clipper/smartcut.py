@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,9 +10,11 @@ from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
 from .audio import has_audio
 from .models import ClipCandidate, Word
 
+# Only remove tokens that are reliably disfluencies without needing linguistic
+# context. Words such as "like", "actually", "literally", and "basically" can
+# carry real meaning and should not be deleted automatically.
 FILLERS = {
     "um", "uh", "erm", "er", "hmm", "mmm", "ah", "eh",
-    "basically", "literally", "actually", "like",
 }
 
 
@@ -66,7 +69,12 @@ def _removals_for_words(
             left_pause = max(0.0, word.start - left)
             right_pause = max(0.0, right - word.end)
             if left_pause + right_pause >= 0.24 and max(left_pause, right_pause) >= 0.12:
-                fillers.append((max(left, word.start - min(0.06, left_pause)), min(right, word.end + min(0.06, right_pause))))
+                fillers.append(
+                    (
+                        max(left, word.start - min(0.06, left_pause)),
+                        min(right, word.end + min(0.06, right_pause)),
+                    )
+                )
         previous_end = max(previous_end, word.end)
 
     tail_gap = max(0.0, candidate.end - previous_end)
@@ -163,12 +171,15 @@ def prepare_compacted_clip(
 
     Intermediate audio is encoded without loudness normalization. Final delivery
     applies loudnorm once, avoiding repeated dynamics processing when smart cuts
-    and punch-ins are both enabled.
+    and punch-ins are both enabled. The intermediate is finalized atomically so a
+    killed worker cannot leave a plausible-looking partial MP4 for a later run.
     """
     if not intervals:
         raise ValueError("At least one keep interval is required")
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    temp = out.with_name(f"{out.stem}.part{out.suffix or '.mp4'}")
+    temp.unlink(missing_ok=True)
     source_has_audio = has_audio(source_path)
     filters: list[str] = []
     concat_parts: list[str] = []
@@ -199,11 +210,19 @@ def prepare_compacted_clip(
     cmd += video_encode_args(QUALITY_FAST)
     if source_has_audio:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
-    cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(out)]
+    cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", *METADATA_SCRUB, str(temp)]
     try:
         subprocess.run(cmd, check=True)
+        if not temp.is_file() or temp.stat().st_size <= 0:
+            raise RuntimeError("Smart-cut FFmpeg produced no output")
+        os.replace(temp, out)
     except FileNotFoundError as exc:
+        temp.unlink(missing_ok=True)
         raise RuntimeError("ffmpeg is required for smart cuts") from exc
     except subprocess.CalledProcessError as exc:
+        temp.unlink(missing_ok=True)
         raise RuntimeError(f"Smart-cut FFmpeg render failed: {exc}") from exc
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     return out
