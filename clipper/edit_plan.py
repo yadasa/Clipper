@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+import shutil
 from pathlib import Path
 
 from .brand import BrandKit, normalize_brand
@@ -113,10 +113,40 @@ def validate_edit_plan(plan: dict) -> dict:
     return plan
 
 
+def _persist_asset(value: str | None, project_root: Path, stem: str) -> str | None:
+    """Copy an external plan asset into the project and return a relative path."""
+    if not value:
+        return None
+    source = Path(value).expanduser()
+    if not source.is_absolute():
+        existing = (project_root / source).resolve()
+        if existing.is_file():
+            return source.as_posix()
+        source = source.resolve()
+    if not source.is_file():
+        return None
+
+    assets = project_root / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix.lower() or ".bin"
+    destination = assets / f"{stem}{suffix}"
+    if source.resolve() != destination.resolve():
+        shutil.copy2(source, destination)
+    return destination.relative_to(project_root).as_posix()
+
+
 def save_edit_plan(plan: dict, path: str | Path) -> Path:
     clean = validate_edit_plan(plan)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Make rerenders self-contained. This is especially important for FastAPI
+    # uploads whose temporary staging files are deleted once the first job ends.
+    brand = dict(clean.get("brand") or {})
+    brand["logo_path"] = _persist_asset(brand.get("logo_path"), out.parent, "logo")
+    clean["brand"] = brand
+    clean["music_path"] = _persist_asset(clean.get("music_path"), out.parent, "music")
+
     temp = out.with_suffix(".tmp")
     temp.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
     temp.replace(out)
