@@ -67,6 +67,11 @@ class VisualCue:
     prompt: str
     modes: list[str] = field(default_factory=lambda: ["split", "pip", "interrupt"])
     asset_path: str | None = None
+    asset_type: str | None = None
+    provider: str | None = None
+    source_url: str | None = None
+    attribution: dict[str, Any] = field(default_factory=dict)
+    relevance_score: float = 0.0
 
 
 @dataclass(slots=True)
