@@ -38,12 +38,7 @@ def availability(editor_dir: str | Path | None = None) -> RemotionAvailability:
 
 
 def choose_render_backend(plan: dict[str, Any], *, force: str | None = None) -> str:
-    """Choose the fastest renderer that still supports the requested composition.
-
-    FFmpeg remains preferred for simple auto edits. Remotion is selected when the
-    scene graph contains animation/graphics features that the fast path cannot
-    faithfully reproduce.
-    """
+    """Choose the fastest renderer that still supports the requested composition."""
     requested = str(force or ((plan.get("scene_graph") or {}).get("render") or {}).get("preferred_backend") or "auto").lower()
     if requested in {"ffmpeg", "remotion"}:
         return requested
@@ -85,7 +80,8 @@ def render_with_remotion(
     if not plan.is_file():
         raise FileNotFoundError(plan)
     output.parent.mkdir(parents=True, exist_ok=True)
-    temp = output.with_name(output.name + ".part")
+    suffix = output.suffix if output.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"} else ".mp4"
+    temp = output.with_name(f"{output.stem}.part{suffix}")
     temp.unlink(missing_ok=True)
 
     cmd = [
@@ -115,6 +111,7 @@ def render_with_remotion(
         text=True,
         bufsize=1,
     )
+    output_tail: list[str] = []
     try:
         assert process.stdout is not None
         for raw in iter(process.stdout.readline, ""):
@@ -127,6 +124,8 @@ def render_with_remotion(
             line = raw.strip()
             if not line:
                 continue
+            output_tail.append(line)
+            output_tail = output_tail[-12:]
             if line.startswith("CLIPPER_PROGRESS ") and progress:
                 try:
                     progress(json.loads(line.removeprefix("CLIPPER_PROGRESS ")))
@@ -134,7 +133,8 @@ def render_with_remotion(
                     pass
         return_code = process.wait(timeout=timeout_seconds)
         if return_code != 0:
-            raise RuntimeError(f"Remotion renderer exited with status {return_code}")
+            detail = " | ".join(output_tail[-5:])
+            raise RuntimeError(f"Remotion renderer exited with status {return_code}{': ' + detail if detail else ''}")
         if not temp.is_file() or temp.stat().st_size < 10_000:
             raise RuntimeError("Remotion renderer did not produce a valid media file")
         os.replace(temp, output)
