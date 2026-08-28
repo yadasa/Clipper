@@ -1,0 +1,45 @@
+{
+  "name": "clipper-remotion-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5175",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "render:plan": "node scripts/render-plan.mjs",
+    "cloud:dispatch": "node scripts/cloud-dispatch.mjs"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.518",
+    "@remotion/captions": "4.0.518",
+    "@remotion/layout-utils": "4.0.518",
+    "@remotion/lottie": "4.0.518",
+    "@remotion/media": "4.0.518",
+    "@remotion/media-parser": "4.0.518",
+    "@remotion/player": "4.0.518",
+    "@remotion/renderer": "4.0.518",
+    "@remotion/rive": "4.0.518",
+    "@remotion/sfx": "4.0.518",
+    "@remotion/shapes": "4.0.518",
+    "@remotion/three": "4.0.518",
+    "@remotion/transitions": "4.0.518",
+    "@remotion/web-renderer": "4.0.518",
+    "firebase": "12.16.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.518",
+    "three": "0.178.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/react": "19.1.2",
+    "@types/react-dom": "19.1.2",
+    "@types/three": "0.176.0",
+    "@vitejs/plugin-react": "4.4.1",
+    "typescript": "5.9.3",
+    "vite": "6.1.0",
+    "vitest": "3.2.4"
+  }
+}
