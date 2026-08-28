@@ -1,8 +1,8 @@
 import {initializeApp} from 'firebase/app';
 import {GoogleAuthProvider, getAuth, getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, type User} from 'firebase/auth';
 import {collection, doc, getDoc, getDocs, getFirestore, query, serverTimestamp, setDoc, where} from 'firebase/firestore';
-import {getDownloadURL, getStorage, ref} from 'firebase/storage';
-import type {EditPlan, ProjectRecord, Ratio} from './types';
+import {getDownloadURL, getStorage, ref, uploadBytesResumable} from 'firebase/storage';
+import type {EditPlan, ProjectRecord, Ratio, SceneAsset} from './types';
 import {ensureV3, normalizedPlanForSave} from './plan';
 
 let initialized: Promise<ReturnType<typeof initializeApp>> | null = null;
@@ -79,15 +79,34 @@ export const loadProject = async (projectId: string, user: User): Promise<{proje
     sourceAsset.storage_path = project.sourceStoragePath || sourceAsset.storage_path || null;
   }
 
-  // Hydrate prior output variants as reusable assets so an editor can use a
-  // finished render as a fallback source or B-roll without another upload.
   for (const output of project.outputs || []) {
     const id = `render:${output.clipId}:${output.aspectRatio}`;
     if (graph.assets[id]?.remote_url) continue;
     const url = await resolveStorageUrl(output.storagePath).catch(() => '');
     graph.assets[id] = {id, type: 'video', role: 'render', name: `${output.clipId} ${output.aspectRatio}`, storage_path: output.storagePath, remote_url: url || null, metadata: {clipId: output.clipId, ratio: output.aspectRatio}};
   }
+
+  for (const asset of Object.values(graph.assets)) {
+    if (!asset.remote_url && asset.storage_path && asset.storage_path.startsWith(`users/${user.uid}/`)) {
+      asset.remote_url = await resolveStorageUrl(asset.storage_path).catch(() => null);
+    }
+  }
   return {project, plan};
+};
+
+export const saveWorkingEdit = async (project: ProjectRecord, user: User, planInput: EditPlan) => {
+  const {db} = await services();
+  const plan = normalizedPlanForSave(planInput);
+  await setDoc(doc(db, 'clipperProjectEdits', project.id), {
+    userId: user.uid,
+    projectId: project.id,
+    revisionId: plan.revision?.id || 'working',
+    message: plan.revision?.message || 'Working edit',
+    sequence: Number(plan.revision?.sequence || 0),
+    plan,
+    updatedAt: serverTimestamp(),
+  }, {merge: true});
+  return plan;
 };
 
 export const saveRevision = async (project: ProjectRecord, user: User, planInput: EditPlan, message: string) => {
@@ -109,6 +128,39 @@ export const listRevisions = async (project: ProjectRecord, user: User) => {
     .map((entry) => ({id: entry.id, ...entry.data()}))
     .filter((entry) => entry.projectId === project.id)
     .sort((a, b) => Number(b.sequence || 0) - Number(a.sequence || 0));
+};
+
+const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 160) || 'asset';
+
+const assetTypeFor = (file: File): SceneAsset['type'] => {
+  if (file.type.startsWith('video/')) return file.type === 'image/gif' ? 'gif' : 'video';
+  if (file.type.startsWith('audio/')) return 'audio';
+  if (file.type === 'image/gif') return 'gif';
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.includes('json') || file.name.toLowerCase().endsWith('.json')) return 'json';
+  return 'video';
+};
+
+export const uploadEditorAsset = async (file: File, project: ProjectRecord, user: User): Promise<SceneAsset> => {
+  if (!file.size) throw new Error('The selected asset is empty.');
+  const maxBytes = 2 * 1024 * 1024 * 1024;
+  if (file.size > maxBytes) throw new Error('Editor assets are limited to 2 GB each.');
+  const {storage} = await services();
+  const id = `asset:${crypto.randomUUID()}`;
+  const storagePath = `users/${user.uid}/project-edits/${project.id}/assets/${id.replace(':', '-')}-${safeFileName(file.name)}`;
+  const storageRef = ref(storage, storagePath);
+  const task = uploadBytesResumable(storageRef, file, {contentType: file.type || 'application/octet-stream'});
+  await new Promise<void>((resolve, reject) => task.on('state_changed', undefined, reject, resolve));
+  const remoteUrl = await getDownloadURL(storageRef);
+  return {
+    id,
+    type: assetTypeFor(file),
+    role: 'editor-asset',
+    name: file.name,
+    storage_path: storagePath,
+    remote_url: remoteUrl,
+    metadata: {size: file.size, contentType: file.type || null},
+  };
 };
 
 export const queueRerender = async (
